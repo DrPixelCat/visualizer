@@ -126,7 +126,7 @@ export default function PathEditorClient() {
     future: [],
   });
   const [editingPathId, setEditingPathId] = useState<string | null>(null);
-  const [dragStartedSelected, setDragStartedSelected] = useState(false);
+  const [dragStartedSnappedEndpoint, setDragStartedSnappedEndpoint] = useState(false);
   const dragStartStateRef = useRef<EditorState | null>(null);
 
   useEffect(() => {
@@ -168,20 +168,15 @@ export default function PathEditorClient() {
 
   function beginDrag(pathId?: string, poseId?: string) {
     dragStartStateRef.current = history.present;
-    setDragStartedSelected(
-      Boolean(
-        pathId &&
-          poseId &&
-          history.present.activePathId === pathId &&
-          history.present.selectedPoseId === poseId,
-      ),
+    setDragStartedSnappedEndpoint(
+      Boolean(pathId && poseId && endpointIsSnapped(history.present, pathId, poseId)),
     );
   }
 
   function endDrag() {
     const dragStartState = dragStartStateRef.current;
     dragStartStateRef.current = null;
-    setDragStartedSelected(false);
+    setDragStartedSnappedEndpoint(false);
     if (!dragStartState) return;
 
     setHistory((current) => ({
@@ -422,7 +417,7 @@ export default function PathEditorClient() {
 
   function handlePoseDragEnd(pathId: string, poseId: string, event: KonvaEventObject<DragEvent>) {
     handlePoseDrag(pathId, poseId, event);
-    if (!dragStartedSelected) {
+    if (!dragStartedSnappedEndpoint) {
       snapEndpointIfClose(pathId, poseId);
     }
     endDrag();
@@ -1510,6 +1505,22 @@ function sanitizePosePatch(
   return { ...pose, ...patch, ...(nextKind ? { kind: nextKind } : {}) };
 }
 
+function endpointIsSnapped(state: EditorState, pathId: string, poseId: string): boolean {
+  const path = state.paths.find((item) => item.id === pathId);
+  if (!path) return false;
+
+  const poseIndex = path.poses.findIndex((pose) => pose.id === poseId);
+  if (!isEndpoint(poseIndex, path.poses.length)) return false;
+
+  const pose = path.poses[poseIndex];
+  return state.paths.some((otherPath) => {
+    if (otherPath.id === pathId) return false;
+    const otherEndpoint =
+      poseIndex === 0 ? otherPath.poses[otherPath.poses.length - 1] : otherPath.poses[0];
+    return Math.hypot(pose.x - otherEndpoint.x, pose.y - otherEndpoint.y) <= 0.05;
+  });
+}
+
 function toCanvasPoint(scale: number): (point: Translation2d) => number[] {
   return (point) => {
     const canvasPoint = toCanvas(point, scale);
@@ -1572,16 +1583,6 @@ function buildApiPreview(path: EditorPath, lengthIn: number, variableName: strin
   const [startPose, ...controlPoses] = path.poses;
   const lines = [`Path ${variableName} = new PathBuilder(${formatStartPose(startPose)})`];
 
-  if (
-    path.interpolation === InterpolationStyle.TANGENT_OPTIMAL ||
-    path.interpolation === InterpolationStyle.TANGENT_FORWARD ||
-    path.interpolation === InterpolationStyle.SMOOTH_START_TO_END
-  ) {
-    if (path.interpolation !== InterpolationStyle.SMOOTH_START_TO_END) {
-      lines.push(`  .setInterpolationStyle(InterpolationStyle.${path.interpolation})`);
-    }
-  }
-
   lines.push("  .addControlPoints(");
   controlPoses.forEach((pose, index) => {
     const suffix = index === controlPoses.length - 1 ? "" : ",";
@@ -1590,7 +1591,14 @@ function buildApiPreview(path: EditorPath, lengthIn: number, variableName: strin
   });
   lines.push("  )");
 
-  if (path.interpolation === InterpolationStyle.CONSTANT_START_HEADING) {
+  if (
+    path.interpolation === InterpolationStyle.TANGENT_OPTIMAL ||
+    path.interpolation === InterpolationStyle.TANGENT_FORWARD
+  ) {
+    lines.push(
+      `  .interpolateWith(new HeadingInterpolator(InterpolationStyle.${path.interpolation}))`,
+    );
+  } else if (path.interpolation === InterpolationStyle.CONSTANT_START_HEADING) {
     lines.push(
       "  .interpolateWith(new HeadingInterpolator(InterpolationStyle.CONSTANT_START_HEADING))",
     );
