@@ -16,6 +16,7 @@ const BLEND_MATRIX = new Matrix([
   [1 / 6, 4 / 6, 1 / 6, 0],
 ]);
 
+// Uniform cubic B-spline ported from the robot pathing library.
 export class BSpline implements ParametricSegment {
   public readonly numSegments: number;
 
@@ -27,6 +28,7 @@ export class BSpline implements ParametricSegment {
       throw new Error("You can't make a B-Spline curve with fewer than 2 points.");
     }
 
+    // Reflected ghost endpoints anchor the curve at the first and last controls.
     const points = inputPoints.map(Vector2d.from);
     const paddedPoints: Vector2d[] = new Array(points.length + 2);
     paddedPoints[0] = points[1].reflect(points[0]);

@@ -1,3 +1,4 @@
+// Minimal immutable matrix helper for spline coefficient generation.
 export class Matrix {
   private readonly data: readonly (readonly number[])[];
   private readonly rows: number;

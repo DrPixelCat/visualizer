@@ -14,6 +14,7 @@ export type CurvedPathElement = {
   samples: SplineSample[];
 };
 
+// Dense samples feed visual overlays without changing the underlying curve math.
 export function sampleParametricSegment(
   segment: ParametricSegment & { getCurvature?: (t: number) => number },
   sampleCount: number,

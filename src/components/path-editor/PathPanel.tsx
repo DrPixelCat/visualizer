@@ -7,6 +7,7 @@ import { INTERPOLATION_OPTIONS } from "@/lib/editor/path-editor-constants";
 import type { BuiltPath, EditorPath, PathAction } from "@/lib/editor/path-editor-types";
 import { ActionButton, IconButton, NumberInput } from "@/components/path-editor/EditorControls";
 
+// Right sidebar for path-level configuration and export preview.
 export function PathPanel({
   paths,
   builtPaths,
@@ -57,7 +58,7 @@ export function PathPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center justify-between border-b border-[#242832] p-4">
+      <div className="flex shrink-0 items-center justify-between border-b border-[var(--editor-border)] p-4">
         <div>
           <h2 className="text-sm font-semibold text-slate-100">Paths</h2>
           <p className="text-xs text-slate-500">Undo, build, and export path chains</p>
@@ -73,7 +74,7 @@ export function PathPanel({
           </IconButton>
           <button
             type="button"
-            className="rounded border border-[#303541] bg-[#181a20] px-3 py-1.5 text-xs text-slate-200"
+            className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-button-background)] px-3 py-1.5 text-xs text-slate-200"
             onClick={onAddPath}
           >
             Add path
@@ -120,7 +121,7 @@ export function PathPanel({
               <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
             </IconButton>
           </div>
-          <pre className="min-h-0 flex-1 overflow-auto rounded border border-[#242832] bg-[#0d0f12] p-3 text-xs leading-5 text-slate-300">
+          <pre className="min-h-0 flex-1 overflow-auto rounded border border-[var(--editor-border)] bg-[var(--editor-code-background)] p-3 text-xs leading-5 text-slate-300">
             <code>{apiPreview}</code>
           </pre>
         </section>
@@ -168,7 +169,8 @@ function PathCard({
 }) {
   return (
     <section
-      className={`rounded border ${active ? "border-orange-400" : "border-[#242832]"} bg-[#101217]`}
+      className="rounded border bg-[var(--editor-panel-inset)]"
+      style={{ borderColor: active ? "var(--editor-selected)" : "var(--editor-border)" }}
     >
       <button
         type="button"
@@ -223,11 +225,11 @@ function PathCard({
       </button>
 
       {!path.collapsed ? (
-        <div className="flex flex-col gap-4 border-t border-[#242832] p-3">
+        <div className="flex flex-col gap-4 border-t border-[var(--editor-border)] p-3">
           <label className="flex flex-col gap-1 text-xs text-slate-500">
             Interpolator
             <select
-              className="rounded border border-[#303541] bg-[#13151a] px-2 py-2 text-sm text-slate-100 outline-none"
+              className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-panel)] px-2 py-2 text-sm text-slate-100 outline-none"
               value={path.interpolation}
               onChange={(event) =>
                 onPatch({ interpolation: event.target.value as InterpolationStyle })
@@ -253,7 +255,7 @@ function PathCard({
             <label className="flex flex-col gap-1 text-xs text-slate-500">
               Distance function preview
               <textarea
-                className="min-h-20 rounded border border-[#303541] bg-[#13151a] px-2 py-2 text-xs leading-5 text-slate-100 outline-none"
+                className="min-h-20 rounded border border-[var(--editor-border-strong)] bg-[var(--editor-panel)] px-2 py-2 text-xs leading-5 text-slate-100 outline-none"
                 value={path.customFunctionSource}
                 onChange={(event) => onPatch({ customFunctionSource: event.target.value })}
               />
@@ -321,7 +323,7 @@ function ActionEditor({
   onRemove: () => void;
 }) {
   return (
-    <div className="rounded border border-[#242832] bg-[#13151a] p-3">
+    <div className="rounded border border-[var(--editor-border)] bg-[var(--editor-panel)] p-3">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-semibold uppercase text-slate-500">{action.type}</span>
         <button type="button" className="text-xs text-slate-400" onClick={onRemove}>
@@ -331,12 +333,12 @@ function ActionEditor({
       {action.type === "callback" ? (
         <div className="grid grid-cols-[1fr_82px] gap-2">
           <input
-            className="rounded border border-[#303541] bg-[#101217] px-2 py-1.5 text-sm text-slate-100 outline-none"
+            className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm text-slate-100 outline-none"
             value={action.label}
             onChange={(event) => onChange({ label: event.target.value })}
           />
           <input
-            className="rounded border border-[#303541] bg-[#101217] px-2 py-1.5 text-sm text-slate-100 outline-none"
+            className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm text-slate-100 outline-none"
             type="number"
             min={0}
             max={Math.max(0, lengthIn)}

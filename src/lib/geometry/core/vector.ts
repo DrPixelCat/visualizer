@@ -5,6 +5,7 @@ export type Translation2d = {
 
 const EPSILON = 1e-9;
 
+// Immutable 2D vector math used by both the editor and spline port.
 export class Vector2d implements Translation2d {
   public readonly x: number;
   public readonly y: number;

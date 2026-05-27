@@ -6,6 +6,7 @@ import type {
   Translation2d,
 } from "@/lib/geometry";
 
+// Editor-side data keeps UI state separate from the pure geometry classes.
 export type PoseKind = "pose" | "arc";
 export type GhostRole = "before" | "after";
 

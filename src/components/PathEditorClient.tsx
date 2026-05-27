@@ -4,13 +4,14 @@ import { PathEditorCanvas } from "@/components/path-editor/PathEditorCanvas";
 import { PathPanel } from "@/components/path-editor/PathPanel";
 import { PosePanel } from "@/components/path-editor/PosePanel";
 import { usePathEditorState } from "@/components/path-editor/usePathEditorState";
+import { editorColorVars } from "@/lib/editor/colors";
 
 export default function PathEditorClient() {
   const editor = usePathEditorState();
 
   return (
-    <>
-      <aside className="w-64 shrink-0 overflow-hidden border-r border-[#242832] bg-[#13151a]">
+    <div className="flex min-h-0 flex-1 overflow-hidden" style={editorColorVars}>
+      <aside className="w-64 shrink-0 overflow-hidden border-r border-[var(--editor-border)] bg-[var(--editor-panel)]">
         <PosePanel
           paths={editor.state.paths}
           activePathId={editor.state.activePathId}
@@ -28,11 +29,11 @@ export default function PathEditorClient() {
         />
       </aside>
 
-      <section className="flex min-h-0 flex-1 items-center justify-start overflow-hidden bg-[#0d0f12] py-2 pl-2 pr-3">
+      <section className="flex min-h-0 flex-1 items-center justify-start overflow-hidden bg-[var(--editor-app-background)] py-2 pl-2 pr-3">
         <div className="field-frame">
           <div
             aria-label="Robot field"
-            className="field-surface h-full w-full overflow-hidden border border-[#303541] bg-[#181a20] shadow-2xl"
+            className="field-surface h-full w-full overflow-hidden border border-[var(--editor-border-strong)] bg-[var(--editor-field-background)] shadow-2xl"
           >
             <div ref={editor.containerRef} className="field-overlay">
               <PathEditorCanvas
@@ -59,7 +60,7 @@ export default function PathEditorClient() {
         </div>
       </section>
 
-      <aside className="w-[765px] shrink-0 overflow-hidden border-l border-[#242832] bg-[#13151a]">
+      <aside className="w-[765px] shrink-0 overflow-hidden border-l border-[var(--editor-border)] bg-[var(--editor-panel)]">
         <PathPanel
           paths={editor.state.paths}
           builtPaths={editor.builtPaths}
@@ -81,6 +82,6 @@ export default function PathEditorClient() {
           onRemoveAction={editor.removeAction}
         />
       </aside>
-    </>
+    </div>
   );
 }

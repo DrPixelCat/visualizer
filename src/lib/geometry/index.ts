@@ -1,3 +1,4 @@
+// Public geometry barrel for editor and future importer/exporter code.
 export { Angle } from "./core/angle";
 export { ArcPose } from "./core/arc-pose";
 export { BSpline, clampSplineParameter } from "./curves/b-spline";

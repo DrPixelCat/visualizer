@@ -1,6 +1,7 @@
 import { InterpolationStyle } from "@/lib/geometry";
 import type { BuiltPath, EditorPath, EditorPose } from "@/lib/editor/path-editor-types";
 
+// Converts editor state into the Java-style fluent API preview.
 export function formatStyle(style: InterpolationStyle): string {
   return style
     .split("_")

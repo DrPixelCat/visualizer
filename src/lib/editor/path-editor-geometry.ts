@@ -18,6 +18,7 @@ import type {
   ProcessedControlPoint,
 } from "@/lib/editor/path-editor-types";
 
+// Builds the renderable spline and LUT wrapper for a single editor path.
 export function buildPath(path: EditorPath): BuiltPath {
   const controls = buildProcessedControls(path.poses);
   const spline = controls.length >= 2 ? new BSpline(controls) : null;
@@ -67,6 +68,7 @@ export function expandArcPose(
   arcPose: EditorPose,
   nextPose: EditorPose,
 ): [Translation2d, Translation2d] {
+  // Arc poses add two ghost controls around the actual pose, matching the Java builder.
   const arcVector = new Vector2d(arcPose.x, arcPose.y);
   const vecToLast = new Vector2d(prevPose.x, prevPose.y).subtract(arcVector);
   const vecToNext = new Vector2d(nextPose.x, nextPose.y).subtract(arcVector);

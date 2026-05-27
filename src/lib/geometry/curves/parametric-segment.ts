@@ -2,6 +2,7 @@ import { Vector2d } from "../core/vector";
 
 const EPSILON = 1e-9;
 
+// Common interface for curves evaluated by normalized parameter t.
 export interface ParametricSegment {
   getPosition(t: number): Vector2d;
   getFirstDerivative(t: number): Vector2d;

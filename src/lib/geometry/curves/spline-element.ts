@@ -9,6 +9,7 @@ export type BSplineElement = {
   samples: readonly SplineSample[];
 };
 
+// Convenience bundle for consumers that need spline math plus sampled overlays.
 export function createBSplineElement(
   controlPoints: readonly Translation2d[],
   sampleCount = 100,

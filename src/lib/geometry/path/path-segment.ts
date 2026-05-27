@@ -4,6 +4,7 @@ import { PathPoint } from "./path-point";
 
 const POINTS_PER_INCH = 0.5;
 
+// Adds arc-length lookup and closest-point projection around a parametric curve.
 export class PathSegment {
   public readonly segment: ParametricSegment;
   public readonly length: number;
@@ -49,6 +50,7 @@ export class PathSegment {
       }
     }
 
+    // Refine the LUT pick with a few Newton-Raphson iterations.
     for (let i = 0; i < 5; i++) {
       const b = this.segment.getPosition(bestT);
       const d1 = this.segment.getFirstDerivative(bestT);

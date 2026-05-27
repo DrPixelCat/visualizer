@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 
+// Small shared form controls keep the side panels visually consistent.
 export function NumberInput({
   label,
   value,
@@ -15,7 +16,7 @@ export function NumberInput({
     <label className="flex flex-col gap-1 text-xs text-slate-500">
       {label}
       <input
-        className="rounded border border-[#303541] bg-[#101217] px-2 py-1.5 text-sm text-slate-100 outline-none disabled:opacity-35"
+        className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm text-slate-100 outline-none disabled:opacity-35"
         type="number"
         value={Number.isFinite(value) ? value : 0}
         disabled={disabled}
@@ -29,7 +30,7 @@ export function ActionButton({ label, onClick }: { label: string; onClick: () =>
   return (
     <button
       type="button"
-      className="rounded border border-[#303541] bg-[#181a20] px-2 py-1 text-[11px] text-slate-200"
+      className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-button-background)] px-2 py-1 text-[11px] text-slate-200"
       onClick={onClick}
     >
       {label}
@@ -54,7 +55,7 @@ export function IconButton({
       aria-label={label}
       title={label}
       disabled={disabled}
-      className="grid h-7 w-7 place-items-center rounded border border-[#303541] bg-[#181a20] text-slate-300 disabled:opacity-35"
+      className="grid h-7 w-7 place-items-center rounded border border-[var(--editor-border-strong)] bg-[var(--editor-button-background)] text-slate-300 disabled:opacity-35"
       onClick={(event) => {
         event.stopPropagation();
         onClick();

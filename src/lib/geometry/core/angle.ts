@@ -1,5 +1,6 @@
 import { normalizeAngle } from "./vector";
 
+// Immutable angle wrapper; radians are the internal source of truth.
 export class Angle {
   private readonly radians: number;
 

@@ -13,6 +13,7 @@ export enum InterpolationStyle {
 
 export type HeadingFunction = (s: number) => Angle;
 
+// Stateful heading strategy object matching the Java path follower API.
 export class HeadingInterpolator {
   private readonly style: InterpolationStyle;
   private readonly startHeading?: Angle;

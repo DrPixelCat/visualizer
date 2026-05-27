@@ -13,6 +13,7 @@ import { PathSegment } from "./path-segment";
 
 const DEFAULT_INTERPOLATION = InterpolationStyle.SMOOTH_START_TO_END;
 
+// Fluent builder mirror used for previews and future import/export checks.
 export class PathBuilder {
   private readonly path = new Path();
   private lastPose: Pose;
@@ -44,6 +45,7 @@ export class PathBuilder {
       }
 
       if (currentPose instanceof ArcPose) {
+        // Arc poses are expanded before spline construction so the core curve stays generic.
         processedPoses.push(...expandArcPose(poses[i - 1], currentPose, poses[i + 1]));
       } else {
         processedPoses.push(currentPose);

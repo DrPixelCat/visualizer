@@ -19,6 +19,7 @@ import {
 import type { BuiltPath, EditorPose, PathAction } from "@/lib/editor/path-editor-types";
 import type { PathSegment } from "@/lib/geometry";
 
+// Konva-only rendering stays isolated behind PathEditor's ssr:false boundary.
 type CanvasDragHandler = (
   pathId: string,
   poseId: string,
@@ -76,7 +77,7 @@ export function PathEditorCanvas({
         <Rect
           width={canvasSize}
           height={canvasSize}
-          fill="rgba(0,0,0,0)"
+          fill={editorColors.transparent}
           onDblClick={onFieldDoubleClick}
         />
         {builtPaths.map((built) => (
@@ -137,6 +138,7 @@ function PathCanvasLayer({
   onCallbackDrag: CallbackDragHandler;
   onCallbackDragEnd: CallbackDragHandler;
 }) {
+  // Render inactive paths dimmed while keeping all geometry available for snapping.
   return (
     <Group opacity={active ? 1 : 0.35} onClick={onSelectPath}>
       <Line

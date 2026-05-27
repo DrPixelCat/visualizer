@@ -1,5 +1,6 @@
 import { Vector2d } from "../core/vector";
 
+// One LUT entry used for fast distance-to-end lookups.
 export class PathPoint {
   public readonly t: number;
   public readonly distanceToEnd: number;

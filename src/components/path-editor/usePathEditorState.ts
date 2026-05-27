@@ -25,6 +25,7 @@ import type {
   PathAction,
 } from "@/lib/editor/path-editor-types";
 
+// Demo seed mirrors the eventual fluent path shape while keeping startup useful.
 const INITIAL_PATHS: EditorPath[] = [
   {
     id: "path-0",
@@ -97,6 +98,7 @@ export function usePathEditorState() {
   const builtPaths = state.paths.map(buildPath);
   const scale = canvasSize / FIELD_SIZE_IN;
 
+  // Commit stores undo checkpoints; live updates avoid filling history during drags.
   function commit(mutator: (current: EditorState) => EditorState) {
     setHistory((current) => {
       const next = mutator(current.present);
@@ -411,6 +413,7 @@ export function usePathEditorState() {
       const pose = path.poses[poseIndex];
       let snapTarget: Translation2d | null = null;
 
+      // Only start-to-end or end-to-start endpoint releases can snap across paths.
       for (const otherPath of current.present.paths) {
         if (otherPath.id === pathId) continue;
         const otherEndpoint =

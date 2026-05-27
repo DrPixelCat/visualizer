@@ -5,6 +5,7 @@ import { isEndpoint } from "@/lib/editor/path-editor-geometry";
 import type { EditorPath, EditorPose } from "@/lib/editor/path-editor-types";
 import { NumberInput } from "@/components/path-editor/EditorControls";
 
+// Left sidebar for reusable pose metadata and direct coordinate editing.
 export function PosePanel({
   paths,
   activePathId,
@@ -26,7 +27,7 @@ export function PosePanel({
 }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 border-b border-[#242832] p-4">
+      <div className="shrink-0 border-b border-[var(--editor-border)] p-4">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-100">Poses</h2>
           <label className="flex items-center gap-2 text-xs text-slate-400">
@@ -48,11 +49,13 @@ export function PosePanel({
                   <button
                     key={pose.id}
                     type="button"
-                    className={`rounded border p-2 text-left ${
-                      selected
-                        ? "border-orange-400 bg-[#181a20]"
-                        : "border-[#242832] bg-[#101217]"
-                    }`}
+                    className="rounded border p-2 text-left"
+                    style={{
+                      backgroundColor: selected
+                        ? "var(--editor-panel-raised)"
+                        : "var(--editor-panel-inset)",
+                      borderColor: selected ? "var(--editor-selected)" : "var(--editor-border)",
+                    }}
                     onClick={() => onSelectPose(path.id, pose.id)}
                   >
                     <div className="flex items-center justify-between gap-2 text-xs text-slate-500">

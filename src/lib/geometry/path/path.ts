@@ -34,6 +34,7 @@ export type HoldPathNode = {
 
 export type PathNode = DrivePathNode | TurnPathNode | HoldPathNode;
 
+// Runtime path container mirrors the Java node model closely.
 export class Path {
   public readonly nodes: PathNode[] = [];
   private currentIndex = 0;

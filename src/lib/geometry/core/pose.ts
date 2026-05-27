@@ -4,6 +4,7 @@ export type Pose2d = Translation2d & {
   heading: number;
 };
 
+// Immutable robot pose; heading may be Infinity when unspecified by the API.
 export class Pose implements Pose2d {
   public readonly x: number;
   public readonly y: number;
