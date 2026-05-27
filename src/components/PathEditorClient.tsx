@@ -76,6 +76,7 @@ type BuiltPath = {
 };
 
 const FIELD_SIZE_IN = 144;
+const FIELD_EDGE_MARGIN_IN = 2;
 const MIN_ARC_RADIUS_IN = 2;
 const MIN_ARC_CLEARANCE_IN = 3;
 const POSE_RADIUS = 5;
@@ -139,6 +140,24 @@ export default function PathEditorClient() {
 
     resizeObserver.observe(element);
     return () => resizeObserver.disconnect();
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return;
+
+      const key = event.key.toLowerCase();
+      if (key === "z") {
+        event.preventDefault();
+        undo();
+      } else if (key === "y") {
+        event.preventDefault();
+        redo();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   const state = history.present;
@@ -265,8 +284,7 @@ export default function PathEditorClient() {
       customFunctionSource: "s -> Angle.fromDeg(180 + (s * 360.0))",
       poses: [
         makePose("pose1", previousEnd.x, previousEnd.y, previousEnd.headingDeg ?? 0),
-        makePose("pose2", clampField(previousEnd.x + 24), clampField(previousEnd.y + 18), null),
-        makePose("pose3", clampField(previousEnd.x + 54), clampField(previousEnd.y - 18), 0),
+        makePose("pose2", clampField(previousEnd.x + 36), clampField(previousEnd.y + 18), 0),
       ],
       actions: [],
     };
@@ -324,7 +342,7 @@ export default function PathEditorClient() {
 
   function deletePose(pathId: string, poseId: string) {
     const path = state.paths.find((item) => item.id === pathId);
-    if (!path || path.poses.length <= 3) return;
+    if (!path || path.poses.length <= 2) return;
 
     const nextPoses = path.poses.filter((pose) => pose.id !== poseId);
     commit((current) => ({
@@ -512,7 +530,7 @@ export default function PathEditorClient() {
                   ...item,
                   poses: item.poses.map((candidate) =>
                     candidate.id === poseId
-                      ? { ...candidate, x: snapTarget.x, y: snapTarget.y }
+                      ? { ...candidate, x: clampField(snapTarget.x), y: clampField(snapTarget.y) }
                       : candidate,
                   ),
                 }
@@ -731,6 +749,7 @@ function PathCanvasLayer({
             x={canvasPoint.x}
             y={canvasPoint.y}
             draggable={active}
+            dragBoundFunc={(position) => clampCanvasPosePosition(position, scale)}
             onClick={(event) => {
               event.cancelBubble = true;
               onSelectPose(pose.id);
@@ -942,6 +961,13 @@ function PathPanel({
   onRemoveAction: (pathId: string, actionId: string) => void;
 }) {
   const apiPreview = buildAllApiPreview(paths, builtPaths);
+  const [copied, setCopied] = useState(false);
+
+  async function copyApiPreview() {
+    await navigator.clipboard.writeText(apiPreview);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -951,11 +977,11 @@ function PathPanel({
           <p className="text-xs text-slate-500">Undo, build, and export path chains</p>
         </div>
         <div className="flex items-center gap-2">
-          <IconButton label="Undo" disabled={!canUndo} onClick={onUndo}>
+          <IconButton label="Undo (Ctrl+Z)" disabled={!canUndo} onClick={onUndo}>
             <path d="M9 7H4v5" />
             <path d="M4 12c2-5 11-6 15 0 1.4 2.2 1.3 4.6-.2 6.6" />
           </IconButton>
-          <IconButton label="Redo" disabled={!canRedo} onClick={onRedo}>
+          <IconButton label="Redo (Ctrl+Y)" disabled={!canRedo} onClick={onRedo}>
             <path d="M15 7h5v5" />
             <path d="M20 12c-2-5-11-6-15 0-1.4 2.2-1.3 4.6.2 6.6" />
           </IconButton>
@@ -1001,7 +1027,13 @@ function PathPanel({
         </div>
 
         <section className="flex min-h-[260px] flex-1 flex-col gap-3">
-          <h3 className="text-xs font-semibold uppercase text-slate-500">Generated API</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold uppercase text-slate-500">Generated API</h3>
+            <IconButton label={copied ? "Copied" : "Copy API"} onClick={copyApiPreview}>
+              <rect x="9" y="9" width="11" height="11" rx="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </IconButton>
+          </div>
           <pre className="min-h-0 flex-1 overflow-auto rounded border border-[#242832] bg-[#0d0f12] p-3 text-xs leading-5 text-slate-300">
             <code>{apiPreview}</code>
           </pre>
@@ -1353,7 +1385,7 @@ function CallbackMarker({
 
 function buildPath(path: EditorPath): BuiltPath {
   const controls = buildProcessedControls(path.poses);
-  const spline = controls.length > 2 ? new BSpline(controls) : null;
+  const spline = controls.length >= 2 ? new BSpline(controls) : null;
   const segment = spline ? new PathSegment(spline) : null;
 
   return {
@@ -1480,8 +1512,8 @@ function makePose(name: string, x: number, y: number, headingDeg: number | null)
   return {
     id: `pose-${crypto.randomUUID()}`,
     name,
-    x,
-    y,
+    x: clampField(x),
+    y: clampField(y),
     headingDeg,
     kind: "pose",
     radius: 10,
@@ -1502,7 +1534,12 @@ function sanitizePosePatch(
 ): EditorPose {
   const index = path.poses.findIndex((item) => item.id === pose.id);
   const nextKind = isEndpoint(index, path.poses.length) && patch.kind === "arc" ? "pose" : patch.kind;
-  return { ...pose, ...patch, ...(nextKind ? { kind: nextKind } : {}) };
+  const nextPose = { ...pose, ...patch, ...(nextKind ? { kind: nextKind } : {}) };
+  return {
+    ...nextPose,
+    x: clampField(nextPose.x),
+    y: clampField(nextPose.y),
+  };
 }
 
 function endpointIsSnapped(state: EditorState, pathId: string, poseId: string): boolean {
@@ -1549,8 +1586,18 @@ function clampCanvasPoint(x: number, y: number, canvasSize: number): Translation
   };
 }
 
+function clampCanvasPosePosition(point: Translation2d, scale: number): Translation2d {
+  return toCanvas(
+    {
+      x: clampField(point.x / scale),
+      y: clampField(FIELD_SIZE_IN - point.y / scale),
+    },
+    scale,
+  );
+}
+
 function clampField(value: number): number {
-  return Math.max(0, Math.min(FIELD_SIZE_IN, value));
+  return Math.max(FIELD_EDGE_MARGIN_IN, Math.min(FIELD_SIZE_IN - FIELD_EDGE_MARGIN_IN, value));
 }
 
 function isEndpoint(index: number, length: number): boolean {

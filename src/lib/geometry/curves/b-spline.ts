@@ -23,8 +23,8 @@ export class BSpline implements ParametricSegment {
   private readonly cy: readonly number[][];
 
   public constructor(inputPoints: readonly Translation2d[]) {
-    if (inputPoints.length <= 2) {
-      throw new Error("You can't make a B-Spline curve with < 2 points!");
+    if (inputPoints.length < 2) {
+      throw new Error("You can't make a B-Spline curve with fewer than 2 points.");
     }
 
     const points = inputPoints.map(Vector2d.from);
