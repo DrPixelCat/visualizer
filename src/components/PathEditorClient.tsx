@@ -126,6 +126,7 @@ export default function PathEditorClient() {
     future: [],
   });
   const [editingPathId, setEditingPathId] = useState<string | null>(null);
+  const [dragStartedSelected, setDragStartedSelected] = useState(false);
   const dragStartStateRef = useRef<EditorState | null>(null);
 
   useEffect(() => {
@@ -165,13 +166,22 @@ export default function PathEditorClient() {
     }));
   }
 
-  function beginDrag() {
+  function beginDrag(pathId?: string, poseId?: string) {
     dragStartStateRef.current = history.present;
+    setDragStartedSelected(
+      Boolean(
+        pathId &&
+          poseId &&
+          history.present.activePathId === pathId &&
+          history.present.selectedPoseId === poseId,
+      ),
+    );
   }
 
   function endDrag() {
     const dragStartState = dragStartStateRef.current;
     dragStartStateRef.current = null;
+    setDragStartedSelected(false);
     if (!dragStartState) return;
 
     setHistory((current) => ({
@@ -412,7 +422,9 @@ export default function PathEditorClient() {
 
   function handlePoseDragEnd(pathId: string, poseId: string, event: KonvaEventObject<DragEvent>) {
     handlePoseDrag(pathId, poseId, event);
-    snapEndpointIfClose(pathId, poseId);
+    if (!dragStartedSelected) {
+      snapEndpointIfClose(pathId, poseId);
+    }
     endDrag();
   }
 
@@ -641,7 +653,7 @@ function PathCanvasLayer({
   scale: number;
   onSelectPath: () => void;
   onSelectPose: (poseId: string) => void;
-  onBeginDrag: () => void;
+  onBeginDrag: (pathId?: string, poseId?: string) => void;
   onPoseDrag: (pathId: string, poseId: string, event: KonvaEventObject<DragEvent>) => void;
   onPoseDragEnd: (pathId: string, poseId: string, event: KonvaEventObject<DragEvent>) => void;
   onPoseDelete: (pathId: string, poseId: string) => void;
@@ -693,7 +705,7 @@ function PathCanvasLayer({
               strokeWidth={1}
               opacity={0.45}
               draggable={active}
-              onDragStart={onBeginDrag}
+              onDragStart={() => onBeginDrag(built.path.id, point.sourcePoseId)}
               onDragMove={(event) => onGhostDrag(built.path.id, point.sourcePoseId, event)}
               onDragEnd={(event) => onGhostDragEnd(built.path.id, point.sourcePoseId, event)}
             />
@@ -707,7 +719,7 @@ function PathCanvasLayer({
             action={action}
             segment={built.segment}
             scale={scale}
-            onDragStart={onBeginDrag}
+            onDragStart={() => onBeginDrag(built.path.id)}
             onDrag={(event) => onCallbackDrag(built.path.id, action.id, event)}
             onDragEnd={(event) => onCallbackDragEnd(built.path.id, action.id, event)}
           />
@@ -737,7 +749,7 @@ function PathCanvasLayer({
               event.cancelBubble = true;
               onPoseDelete(built.path.id, pose.id);
             }}
-            onDragStart={onBeginDrag}
+            onDragStart={() => onBeginDrag(built.path.id, pose.id)}
             onDragMove={(event) => onPoseDrag(built.path.id, pose.id, event)}
             onDragEnd={(event) => onPoseDragEnd(built.path.id, pose.id, event)}
           >
@@ -1580,12 +1592,11 @@ function buildApiPreview(path: EditorPath, lengthIn: number, variableName: strin
 
   if (path.interpolation === InterpolationStyle.CONSTANT_START_HEADING) {
     lines.push(
-      `  .interpolateWith(new HeadingInterpolator(InterpolationStyle.CONSTANT_START_HEADING, Angle.fromDeg(${formatNumber(startPose.headingDeg ?? 0)})))`,
+      "  .interpolateWith(new HeadingInterpolator(InterpolationStyle.CONSTANT_START_HEADING))",
     );
   } else if (path.interpolation === InterpolationStyle.CONSTANT_END_HEADING) {
-    const endPose = path.poses[path.poses.length - 1];
     lines.push(
-      `  .interpolateWith(new HeadingInterpolator(InterpolationStyle.CONSTANT_END_HEADING, Angle.fromDeg(${formatNumber(endPose.headingDeg ?? 0)})))`,
+      "  .interpolateWith(new HeadingInterpolator(InterpolationStyle.CONSTANT_END_HEADING))",
     );
   } else if (path.interpolation === InterpolationStyle.TANGENT_CUSTOM) {
     lines.push(
