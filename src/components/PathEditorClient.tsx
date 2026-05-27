@@ -3,14 +3,20 @@
 import { PathEditorCanvas } from "@/components/path-editor/PathEditorCanvas";
 import { PathPanel } from "@/components/path-editor/PathPanel";
 import { PosePanel } from "@/components/path-editor/PosePanel";
+import { useResizablePathPanel } from "@/components/path-editor/useResizablePathPanel";
 import { usePathEditorState } from "@/components/path-editor/usePathEditorState";
 import { editorColorVars } from "@/lib/editor/colors";
 
 export default function PathEditorClient() {
   const editor = usePathEditorState();
+  const pathPanel = useResizablePathPanel();
 
   return (
-    <div className="flex min-h-0 flex-1 overflow-hidden" style={editorColorVars}>
+    <div
+      ref={pathPanel.workspaceRef}
+      className="flex min-h-0 flex-1 overflow-hidden"
+      style={editorColorVars}
+    >
       <aside className="w-64 shrink-0 overflow-hidden border-r border-[var(--editor-border)] bg-[var(--editor-panel)]">
         <PosePanel
           paths={editor.state.paths}
@@ -29,8 +35,8 @@ export default function PathEditorClient() {
         />
       </aside>
 
-      <section className="flex min-h-0 flex-1 items-center justify-start overflow-hidden bg-[var(--editor-app-background)] py-2 pl-2 pr-3">
-        <div className="field-frame">
+      <section className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-[var(--editor-app-background)] py-2 pl-2 pr-3">
+        <div className="field-frame min-h-0 max-h-full max-w-full">
           <div
             aria-label="Robot field"
             className="field-surface h-full w-full overflow-hidden border border-[var(--editor-border-strong)] bg-[var(--editor-field-background)] shadow-2xl"
@@ -60,7 +66,23 @@ export default function PathEditorClient() {
         </div>
       </section>
 
-      <aside className="w-[765px] shrink-0 overflow-hidden border-l border-[var(--editor-border)] bg-[var(--editor-panel)]">
+      <div
+        aria-label="Resize paths panel"
+        role="separator"
+        aria-orientation="vertical"
+        className="group grid w-2 shrink-0 cursor-col-resize place-items-center border-l border-r border-[var(--editor-border)] bg-[var(--editor-panel-inset)]"
+        {...pathPanel.pathPanelResizeProps}
+      >
+        <div
+          className="h-12 w-px bg-[var(--editor-border-strong)] group-hover:bg-slate-500"
+          style={{ opacity: pathPanel.isDraggingPathPanel ? 1 : undefined }}
+        />
+      </div>
+
+      <aside
+        className="shrink-0 overflow-hidden bg-[var(--editor-panel)]"
+        style={{ width: pathPanel.pathPanelWidth }}
+      >
         <PathPanel
           paths={editor.state.paths}
           builtPaths={editor.builtPaths}

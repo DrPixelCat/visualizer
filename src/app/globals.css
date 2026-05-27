@@ -59,7 +59,8 @@ body {
 
 .field-frame {
   aspect-ratio: 1 / 1;
-  width: min(100%, calc(100vh - 4.5rem));
+  max-height: 100%;
+  width: min(100%, calc(100dvh - 4.5rem));
 }
 
 /* The field image sits under Konva while the grid provides scale when it is missing. */
