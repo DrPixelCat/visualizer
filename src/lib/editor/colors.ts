@@ -1,0 +1,18 @@
+export const editorColors = {
+  border: "#242832",
+  borderStrong: "#303541",
+  canvasPath: "#38bdf8",
+  canvasPathInactive: "#64748b",
+  callback: "#facc15",
+  callbackStroke: "#422006",
+  ghostFill: "#94a3b8",
+  ghostStroke: "#cbd5e1",
+  poseFill: "#e2e8f0",
+  arcPoseFill: "#475569",
+  selected: "#f97316",
+  panel: "#13151a",
+  panelInset: "#101217",
+  panelRaised: "#181a20",
+  textPrimary: "#e2e8f0",
+  textMuted: "#94a3b8",
+} as const;
