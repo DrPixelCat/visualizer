@@ -1,29 +1,63 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 // Small shared form controls keep the side panels visually consistent.
 export function NumberInput({
   label,
   value,
   disabled,
+  min,
+  max,
+  step,
   onChange,
 }: {
   label: string;
   value: number;
   disabled?: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
   onChange: (value: number) => void;
 }) {
+  const [focused, setFocused] = useState(false);
+  const [displayValue, setDisplayValue] = useState(() => formatInputValue(value));
+
+  useEffect(() => {
+    if (!focused) setDisplayValue(formatInputValue(value));
+  }, [focused, value]);
+
   return (
     <label className="flex flex-col gap-1 text-xs text-slate-500">
       {label}
       <input
         className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm text-slate-100 outline-none disabled:opacity-35"
         type="number"
-        value={Number.isFinite(value) ? value : 0}
+        min={min}
+        max={max}
+        step={step}
+        value={displayValue}
         disabled={disabled}
-        onChange={(event) => onChange(Number(event.target.value))}
+        onFocus={() => setFocused(true)}
+        onBlur={() => {
+          setFocused(false);
+          setDisplayValue(formatInputValue(value));
+        }}
+        onChange={(event) => {
+          const nextValue = event.target.value;
+          setDisplayValue(nextValue);
+          if (nextValue === "" || nextValue === "-" || nextValue === "." || nextValue === "-.") {
+            return;
+          }
+
+          const parsed = Number(nextValue);
+          if (Number.isFinite(parsed)) onChange(parsed);
+        }}
       />
     </label>
   );
+}
+
+function formatInputValue(value: number): string {
+  return Number.isFinite(value) ? String(value) : "";
 }
 
 export function ActionButton({ label, onClick }: { label: string; onClick: () => void }) {

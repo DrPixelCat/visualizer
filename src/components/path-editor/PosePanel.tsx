@@ -15,6 +15,7 @@ export function PosePanel({
   onSelectPose,
   onRename,
   onPatchPose,
+  onArcShortcutHint,
 }: {
   paths: EditorPath[];
   activePathId: string;
@@ -24,6 +25,7 @@ export function PosePanel({
   onSelectPose: (pathId: string, poseId: string) => void;
   onRename: (pathId: string, poseId: string, name: string) => void;
   onPatchPose: (pathId: string, poseId: string, patch: Partial<EditorPose>) => void;
+  onArcShortcutHint: () => void;
 }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -60,7 +62,7 @@ export function PosePanel({
                   >
                     <div className="flex items-center justify-between gap-2 text-xs text-slate-500">
                       <input
-                        className="min-w-0 flex-1 bg-transparent text-sm font-medium text-slate-100 outline-none"
+                        className="min-w-0 flex-1 rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm font-medium text-slate-100 outline-none"
                         value={pose.name}
                         onChange={(event) => onRename(path.id, pose.id, event.target.value)}
                         onClick={(event) => event.stopPropagation()}
@@ -77,11 +79,12 @@ export function PosePanel({
                         <input
                           type="checkbox"
                           checked={pose.kind === "arc"}
-                          onChange={(event) =>
+                          onChange={(event) => {
+                            if (selected) onArcShortcutHint();
                             onPatchPose(path.id, pose.id, {
                               kind: event.target.checked ? "arc" : "pose",
-                            })
-                          }
+                            });
+                          }}
                         />
                         Arc pose
                       </label>

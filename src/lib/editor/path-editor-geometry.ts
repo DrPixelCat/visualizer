@@ -35,11 +35,17 @@ export function buildPath(path: EditorPath): BuiltPath {
 
 export function buildProcessedControls(poses: EditorPose[]): ProcessedControlPoint[] {
   const processed: ProcessedControlPoint[] = [];
+  const arcRadii = resolveArcRadii(poses);
 
   for (let i = 0; i < poses.length; i++) {
     const pose = poses[i];
     if (pose.kind === "arc" && !isEndpoint(i, poses.length)) {
-      const [p1, p2] = expandArcPose(poses[i - 1], pose, poses[i + 1]);
+      const [p1, p2] = expandArcPoseWithRadius(
+        poses[i - 1],
+        pose,
+        poses[i + 1],
+        arcRadii.get(pose.id) ?? pose.radius,
+      );
       processed.push({
         ...p1,
         id: `${pose.id}-ghost-a`,
@@ -68,6 +74,15 @@ export function expandArcPose(
   arcPose: EditorPose,
   nextPose: EditorPose,
 ): [Translation2d, Translation2d] {
+  return expandArcPoseWithRadius(prevPose, arcPose, nextPose, arcPose.radius);
+}
+
+function expandArcPoseWithRadius(
+  prevPose: EditorPose,
+  arcPose: EditorPose,
+  nextPose: EditorPose,
+  targetRadius: number,
+): [Translation2d, Translation2d] {
   // Arc poses add two ghost controls around the actual pose, matching the Java builder.
   const arcVector = new Vector2d(arcPose.x, arcPose.y);
   const vecToLast = new Vector2d(prevPose.x, prevPose.y).subtract(arcVector);
@@ -79,13 +94,40 @@ export function expandArcPose(
     return [arcVector.copy(), arcVector.copy()];
   }
 
-  const maxRadius = Math.max(MIN_ARC_RADIUS_IN, Math.min(distToLast, distToNext));
-  const radius = Math.max(MIN_ARC_RADIUS_IN, Math.min(arcPose.radius, maxRadius));
+  const maxRadius = Math.min(distToLast, distToNext);
+  const radius = Math.max(0, Math.min(targetRadius, maxRadius));
 
   return [
     arcVector.add(vecToLast.multiply(radius / distToLast)),
     arcVector.add(vecToNext.multiply(radius / distToNext)),
   ];
+}
+
+function resolveArcRadii(poses: EditorPose[]): Map<string, number> {
+  const radii = new Map<string, number>();
+
+  poses.forEach((pose, index) => {
+    if (pose.kind !== "arc" || isEndpoint(index, poses.length)) return;
+
+    let radius = Math.max(MIN_ARC_RADIUS_IN, pose.radius);
+    const prevPose = poses[index - 1];
+    const nextPose = poses[index + 1];
+    radius = Math.min(radius, Math.hypot(pose.x - prevPose.x, pose.y - prevPose.y));
+    radius = Math.min(radius, Math.hypot(pose.x - nextPose.x, pose.y - nextPose.y));
+
+    for (const neighbor of [prevPose, nextPose]) {
+      if (neighbor.kind !== "arc") continue;
+
+      const distance = Math.hypot(pose.x - neighbor.x, pose.y - neighbor.y);
+      const available = Math.max(0, distance - MIN_ARC_CLEARANCE_IN);
+      const totalRequested = Math.max(MIN_ARC_RADIUS_IN, pose.radius) + Math.max(MIN_ARC_RADIUS_IN, neighbor.radius);
+      radius = Math.min(radius, totalRequested <= 1e-9 ? 0 : (Math.max(MIN_ARC_RADIUS_IN, pose.radius) / totalRequested) * available);
+    }
+
+    radii.set(pose.id, radius);
+  });
+
+  return radii;
 }
 
 export function constrainPointNearArcs(
@@ -137,6 +179,11 @@ export function pointAtDistance(segment: PathSegment, distanceIn: number): Vecto
   }
 
   return segment.getPosition(distanceIn <= 0 ? 0 : 0.999999);
+}
+
+export function distanceToPathIn(segment: PathSegment, point: Translation2d): number {
+  const t = segment.getBestT(point);
+  return segment.getPosition(t).subtract(point).getMagnitude();
 }
 
 export function sampleSplinePoints(spline: BSpline, sampleCount: number): Vector2d[] {
@@ -210,16 +257,18 @@ export function toCanvasPoint(scale: number): (point: Translation2d) => number[]
 }
 
 export function toCanvas(point: Translation2d, scale: number): Translation2d {
+  const halfField = FIELD_SIZE_IN / 2;
   return {
-    x: point.x * scale,
-    y: (FIELD_SIZE_IN - point.y) * scale,
+    x: (point.x + halfField) * scale,
+    y: (halfField - point.y) * scale,
   };
 }
 
 export function fromCanvas(point: Translation2d, scale: number): Translation2d {
+  const halfField = FIELD_SIZE_IN / 2;
   return {
-    x: point.x / scale,
-    y: FIELD_SIZE_IN - point.y / scale,
+    x: point.x / scale - halfField,
+    y: halfField - point.y / scale,
   };
 }
 
@@ -231,17 +280,19 @@ export function clampCanvasPoint(x: number, y: number, canvasSize: number): Tran
 }
 
 export function clampCanvasPosePosition(point: Translation2d, scale: number): Translation2d {
+  const halfField = FIELD_SIZE_IN / 2;
   return toCanvas(
     {
-      x: clampField(point.x / scale),
-      y: clampField(FIELD_SIZE_IN - point.y / scale),
+      x: clampField(point.x / scale - halfField),
+      y: clampField(halfField - point.y / scale),
     },
     scale,
   );
 }
 
 export function clampField(value: number): number {
-  return Math.max(FIELD_EDGE_MARGIN_IN, Math.min(FIELD_SIZE_IN - FIELD_EDGE_MARGIN_IN, value));
+  const limit = FIELD_SIZE_IN / 2 - FIELD_EDGE_MARGIN_IN;
+  return Math.max(-limit, Math.min(limit, value));
 }
 
 export function isEndpoint(index: number, length: number): boolean {

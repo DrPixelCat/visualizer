@@ -23,6 +23,12 @@ export type PathAction =
   | { id: string; type: "turn"; headingDeg: number }
   | { id: string; type: "hold"; durationSeconds: number };
 
+export type EditorSelection =
+  | { type: "pose"; pathId: string; poseId: string }
+  | { type: "path"; pathId: string }
+  | { type: "action"; pathId: string; actionId: string }
+  | null;
+
 export type EditorPath = {
   id: string;
   name: string;
@@ -37,7 +43,7 @@ export type EditorPath = {
 export type EditorState = {
   paths: EditorPath[];
   activePathId: string;
-  selectedPoseId: string;
+  selection: EditorSelection;
   showPoseLabels: boolean;
 };
 

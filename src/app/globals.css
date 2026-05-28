@@ -32,6 +32,11 @@ body {
   color: var(--foreground);
 }
 
+input[type="checkbox"] {
+  accent-color: var(--editor-border-strong);
+  color-scheme: dark;
+}
+
 /* Keep native scrollbars aligned with the editor chrome. */
 * {
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { InterpolationStyle } from "@/lib/geometry";
 import { buildAllApiPreview, formatStyle } from "@/lib/editor/path-editor-api";
 import { INTERPOLATION_OPTIONS } from "@/lib/editor/path-editor-constants";
@@ -14,7 +14,6 @@ export function PathPanel({
   activePathId,
   canUndo,
   canRedo,
-  editingPathId,
   onUndo,
   onRedo,
   onAddPath,
@@ -22,8 +21,6 @@ export function PathPanel({
   onMovePath,
   onActivatePath,
   onPatchPath,
-  onStartRename,
-  onStopRename,
   onAddAction,
   onPatchAction,
   onRemoveAction,
@@ -33,7 +30,6 @@ export function PathPanel({
   activePathId: string;
   canUndo: boolean;
   canRedo: boolean;
-  editingPathId: string | null;
   onUndo: () => void;
   onRedo: () => void;
   onAddPath: () => void;
@@ -41,13 +37,11 @@ export function PathPanel({
   onMovePath: (pathId: string, direction: -1 | 1) => void;
   onActivatePath: (pathId: string) => void;
   onPatchPath: (pathId: string, patch: Partial<EditorPath>) => void;
-  onStartRename: (pathId: string) => void;
-  onStopRename: () => void;
   onAddAction: (pathId: string, type: PathAction["type"]) => void;
   onPatchAction: (pathId: string, actionId: string, patch: Partial<PathAction>) => void;
   onRemoveAction: (pathId: string, actionId: string) => void;
 }) {
-  const apiPreview = buildAllApiPreview(paths, builtPaths);
+  const apiPreview = useMemo(() => buildAllApiPreview(paths, builtPaths), [paths, builtPaths]);
   const [copied, setCopied] = useState(false);
 
   async function copyApiPreview() {
@@ -96,14 +90,11 @@ export function PathPanel({
                   canDelete={paths.length > 1}
                   canMoveUp={index > 0}
                   canMoveDown={index < paths.length - 1}
-                  editing={editingPathId === path.id}
                   onActivate={() => onActivatePath(path.id)}
                   onPatch={(patch) => onPatchPath(path.id, patch)}
                   onDelete={() => onDeletePath(path.id)}
                   onMoveUp={() => onMovePath(path.id, -1)}
                   onMoveDown={() => onMovePath(path.id, 1)}
-                  onStartRename={() => onStartRename(path.id)}
-                  onStopRename={onStopRename}
                   onAddAction={(type) => onAddAction(path.id, type)}
                   onPatchAction={(actionId, patch) => onPatchAction(path.id, actionId, patch)}
                   onRemoveAction={(actionId) => onRemoveAction(path.id, actionId)}
@@ -137,14 +128,11 @@ function PathCard({
   canDelete,
   canMoveUp,
   canMoveDown,
-  editing,
   onActivate,
   onPatch,
   onDelete,
   onMoveUp,
   onMoveDown,
-  onStartRename,
-  onStopRename,
   onAddAction,
   onPatchAction,
   onRemoveAction,
@@ -155,14 +143,11 @@ function PathCard({
   canDelete: boolean;
   canMoveUp: boolean;
   canMoveDown: boolean;
-  editing: boolean;
   onActivate: () => void;
   onPatch: (patch: Partial<EditorPath>) => void;
   onDelete: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
-  onStartRename: () => void;
-  onStopRename: () => void;
   onAddAction: (type: PathAction["type"]) => void;
   onPatchAction: (actionId: string, patch: Partial<PathAction>) => void;
   onRemoveAction: (actionId: string) => void;
@@ -177,24 +162,12 @@ function PathCard({
         className="flex w-full items-center justify-between gap-2 p-3 text-left"
         onClick={onActivate}
       >
-        {editing ? (
-          <input
-            className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none"
-            value={path.name}
-            autoFocus
-            onBlur={onStopRename}
-            onChange={(event) => onPatch({ name: event.target.value })}
-            onClick={(event) => event.stopPropagation()}
-          />
-        ) : (
-          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-100">
-            {path.name}
-          </span>
-        )}
-        <IconButton label="Rename" onClick={onStartRename}>
-          <path d="M12 20h9" />
-          <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-        </IconButton>
+        <input
+          className="min-w-0 flex-1 rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm font-semibold text-slate-100 outline-none"
+          value={path.name}
+          onChange={(event) => onPatch({ name: event.target.value })}
+          onClick={(event) => event.stopPropagation()}
+        />
         <IconButton label="Move up" disabled={!canMoveUp} onClick={onMoveUp}>
           <path d="m18 15-6-6-6 6" />
         </IconButton>
@@ -337,15 +310,14 @@ function ActionEditor({
             value={action.label}
             onChange={(event) => onChange({ label: event.target.value })}
           />
-          <input
-            className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm text-slate-100 outline-none"
-            type="number"
+          <NumberInput
+            label="Distance"
+            value={action.distanceIn}
             min={0}
             max={Math.max(0, lengthIn)}
             step={1}
-            value={action.distanceIn}
-            onChange={(event) =>
-              onChange({ distanceIn: Math.max(0, Math.min(lengthIn, Number(event.target.value))) })
+            onChange={(distanceIn) =>
+              onChange({ distanceIn: Math.max(0, Math.min(lengthIn, distanceIn)) })
             }
           />
         </div>

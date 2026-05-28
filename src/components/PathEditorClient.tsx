@@ -21,7 +21,7 @@ export default function PathEditorClient() {
         <PosePanel
           paths={editor.state.paths}
           activePathId={editor.state.activePathId}
-          selectedPoseId={editor.state.selectedPoseId}
+          selectedPoseId={editor.selectedPoseId}
           showPoseLabels={editor.state.showPoseLabels}
           onToggleLabels={() =>
             editor.commit((current) => ({
@@ -32,6 +32,7 @@ export default function PathEditorClient() {
           onSelectPose={editor.selectPose}
           onRename={(pathId, poseId, name) => editor.patchPose(pathId, poseId, { name })}
           onPatchPose={(pathId, poseId, patch) => editor.patchPose(pathId, poseId, patch)}
+          onArcShortcutHint={editor.showArcShortcutHint}
         />
       </aside>
 
@@ -42,24 +43,40 @@ export default function PathEditorClient() {
             className="field-surface h-full w-full overflow-hidden border border-[var(--editor-border-strong)] bg-[var(--editor-field-background)] shadow-2xl"
           >
             <div ref={editor.containerRef} className="field-overlay">
+              {editor.arcShortcutHintVisible ? (
+                <div className="pointer-events-none absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded border border-[var(--editor-border-strong)] bg-[var(--editor-panel)] px-3 py-1.5 text-xs text-slate-200 shadow-lg">
+                  Press A to make the selected pose an arc pose.
+                </div>
+              ) : null}
               <PathEditorCanvas
                 builtPaths={editor.builtPaths}
                 activePathId={editor.state.activePathId}
-                selectedPoseId={editor.state.selectedPoseId}
+                selectedPoseId={editor.selectedPoseId}
+                selectedPathId={
+                  editor.state.selection?.type === "path" ? editor.state.selection.pathId : ""
+                }
+                selectedActionId={editor.selectedActionId}
+                pendingHeadingPoseId={editor.pendingHeadingPoseId}
                 showPoseLabels={editor.state.showPoseLabels}
                 canvasSize={editor.canvasSize}
                 scale={editor.scale}
+                onFieldClick={editor.handleFieldClick}
                 onFieldDoubleClick={editor.handleFieldDoubleClick}
-                onSelectPath={editor.selectPath}
                 onSelectPose={editor.selectPose}
+                onSelectAction={editor.selectAction}
                 onBeginDrag={editor.beginDrag}
+                onBeginPathDrag={editor.beginPathDrag}
+                onPathDrag={editor.handlePathDrag}
+                onPathDragEnd={editor.handlePathDragEnd}
                 onPoseDrag={editor.handlePoseDrag}
                 onPoseDragEnd={editor.handlePoseDragEnd}
-                onPoseDelete={editor.deletePose}
                 onGhostDrag={editor.handleGhostDrag}
                 onGhostDragEnd={editor.handleGhostDragEnd}
                 onCallbackDrag={editor.handleCallbackDrag}
                 onCallbackDragEnd={editor.handleCallbackDragEnd}
+                onCallbackDelete={editor.removeAction}
+                onHeadingDrag={editor.handleHeadingDrag}
+                onHeadingDragEnd={editor.handleHeadingDragEnd}
               />
             </div>
           </div>
@@ -89,7 +106,6 @@ export default function PathEditorClient() {
           activePathId={editor.state.activePathId}
           canUndo={editor.history.past.length > 0}
           canRedo={editor.history.future.length > 0}
-          editingPathId={editor.editingPathId}
           onUndo={editor.undo}
           onRedo={editor.redo}
           onAddPath={editor.addPath}
@@ -97,8 +113,6 @@ export default function PathEditorClient() {
           onMovePath={editor.movePath}
           onActivatePath={editor.selectPath}
           onPatchPath={editor.patchPath}
-          onStartRename={editor.setEditingPathId}
-          onStopRename={() => editor.setEditingPathId(null)}
           onAddAction={editor.addAction}
           onPatchAction={editor.patchAction}
           onRemoveAction={editor.removeAction}

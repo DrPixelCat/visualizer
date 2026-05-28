@@ -1,8 +1,8 @@
 import { InterpolationStyle } from "@/lib/geometry";
 
 // Field dimensions and interaction tolerances are expressed in real inches.
-export const FIELD_SIZE_IN = 144;
-export const FIELD_EDGE_MARGIN_IN = 2;
+export const FIELD_SIZE_IN = 141;
+export const FIELD_EDGE_MARGIN_IN = 0;
 export const MIN_ARC_RADIUS_IN = 2;
 export const MIN_ARC_CLEARANCE_IN = 3;
 export const POSE_RADIUS = 5;
