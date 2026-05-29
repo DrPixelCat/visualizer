@@ -16,7 +16,7 @@ import {
   toCanvas,
   toCanvasPoint,
 } from "@/lib/editor/path-editor-geometry";
-import type { BuiltPath, EditorPose, PathAction } from "@/lib/editor/path-editor-types";
+import type { BuiltPath, EditorPose, EditorTurn, PathAction } from "@/lib/editor/path-editor-types";
 import type { PathSegment } from "@/lib/geometry";
 
 // Konva-only rendering stays isolated behind PathEditor's ssr:false boundary.
@@ -32,12 +32,16 @@ type CallbackDragHandler = (
   event: KonvaEventObject<DragEvent>,
 ) => void;
 
+type TurnDragHandler = (turnId: string, event: KonvaEventObject<DragEvent>) => void;
+
 export function PathEditorCanvas({
   builtPaths,
+  turns,
   activePathId,
   selectedPoseId,
   selectedPathId,
   selectedActionId,
+  selectedTurnId,
   pendingHeadingPoseId,
   showPoseLabels,
   canvasSize,
@@ -46,6 +50,7 @@ export function PathEditorCanvas({
   onFieldDoubleClick,
   onSelectPose,
   onSelectAction,
+  onSelectTurn,
   onBeginDrag,
   onBeginPathDrag,
   onPathDrag,
@@ -57,14 +62,18 @@ export function PathEditorCanvas({
   onCallbackDrag,
   onCallbackDragEnd,
   onCallbackDelete,
+  onTurnDrag,
+  onTurnDragEnd,
   onHeadingDrag,
   onHeadingDragEnd,
 }: {
   builtPaths: BuiltPath[];
+  turns: EditorTurn[];
   activePathId: string;
   selectedPoseId: string;
   selectedPathId: string;
   selectedActionId: string;
+  selectedTurnId: string;
   pendingHeadingPoseId: string | null;
   showPoseLabels: boolean;
   canvasSize: number;
@@ -73,6 +82,7 @@ export function PathEditorCanvas({
   onFieldDoubleClick: (event: KonvaEventObject<MouseEvent>) => void;
   onSelectPose: (pathId: string, poseId: string) => void;
   onSelectAction: (pathId: string, actionId: string) => void;
+  onSelectTurn: (turnId: string) => void;
   onBeginDrag: (pathId?: string, poseId?: string) => void;
   onBeginPathDrag: (pathId: string, event: KonvaEventObject<DragEvent>) => void;
   onPathDrag: (pathId: string, event: KonvaEventObject<DragEvent>) => void;
@@ -84,6 +94,8 @@ export function PathEditorCanvas({
   onCallbackDrag: CallbackDragHandler;
   onCallbackDragEnd: CallbackDragHandler;
   onCallbackDelete: (pathId: string, actionId: string) => void;
+  onTurnDrag: TurnDragHandler;
+  onTurnDragEnd: TurnDragHandler;
   onHeadingDrag: CanvasDragHandler;
   onHeadingDragEnd: CanvasDragHandler;
 }) {
@@ -124,6 +136,18 @@ export function PathEditorCanvas({
             onCallbackDelete={onCallbackDelete}
             onHeadingDrag={onHeadingDrag}
             onHeadingDragEnd={onHeadingDragEnd}
+          />
+        ))}
+        {turns.map((turn) => (
+          <TurnNode
+            key={turn.id}
+            turn={turn}
+            selected={turn.id === selectedTurnId}
+            scale={scale}
+            onSelect={() => onSelectTurn(turn.id)}
+            onDragStart={() => onBeginDrag()}
+            onDrag={(event) => onTurnDrag(turn.id, event)}
+            onDragEnd={(event) => onTurnDragEnd(turn.id, event)}
           />
         ))}
       </Layer>
@@ -276,7 +300,7 @@ function PathCanvasLayer({
         })}
 
       {built.path.actions.map((action) =>
-        action.type === "callback" && built.segment ? (
+        action.type === "distanceCallback" && built.segment ? (
           <CallbackMarker
             key={action.id}
             action={action}
@@ -482,7 +506,7 @@ function CallbackMarker({
   onDrag,
   onDragEnd,
 }: {
-  action: Extract<PathAction, { type: "callback" }>;
+  action: Extract<PathAction, { type: "distanceCallback" }>;
   segment: PathSegment;
   scale: number;
   selected: boolean;
@@ -537,4 +561,105 @@ function CallbackMarker({
       />
     </Group>
   );
+}
+
+function TurnNode({
+  turn,
+  selected,
+  scale,
+  onSelect,
+  onDragStart,
+  onDrag,
+  onDragEnd,
+}: {
+  turn: EditorTurn;
+  selected: boolean;
+  scale: number;
+  onSelect: () => void;
+  onDragStart: () => void;
+  onDrag: (event: KonvaEventObject<DragEvent>) => void;
+  onDragEnd: (event: KonvaEventObject<DragEvent>) => void;
+}) {
+  const center = toCanvas(turn, scale);
+  const diffDeg = shortestTurnDeg(turn.startHeadingDeg, turn.targetHeadingDeg);
+  const clockwise = diffDeg < 0;
+  const radius = 15 + Math.min(34, Math.abs(diffDeg) * 0.16);
+  const color = selected ? editorColors.selected : editorColors.callback;
+  const arcPoints = buildTurnArcPoints(turn.startHeadingDeg, diffDeg, radius);
+  const end = arcPoints.slice(-2);
+  const previous = arcPoints.slice(-4, -2);
+  const tangent = { x: end[0] - previous[0], y: end[1] - previous[1] };
+  const tangentAngle = Math.atan2(tangent.y, tangent.x);
+
+  return (
+    <Group
+      x={center.x}
+      y={center.y}
+      draggable
+      dragBoundFunc={(position) => clampCanvasPosePosition(position, scale)}
+      onClick={(event) => {
+        event.cancelBubble = true;
+        onSelect();
+      }}
+      onTap={(event) => {
+        event.cancelBubble = true;
+        onSelect();
+      }}
+      onDragStart={(event) => {
+        event.cancelBubble = true;
+        onDragStart();
+      }}
+      onDragMove={(event) => {
+        event.cancelBubble = true;
+        onDrag(event);
+      }}
+      onDragEnd={(event) => {
+        event.cancelBubble = true;
+        onDragEnd(event);
+      }}
+    >
+      <Circle radius={5} fill={editorColors.panel} stroke={color} strokeWidth={selected ? 3 : 2} />
+      <Line
+        points={arcPoints}
+        stroke={color}
+        strokeWidth={3}
+        lineCap="round"
+        lineJoin="round"
+        dash={clockwise ? [7, 4] : undefined}
+      />
+      <Line
+        points={[
+          end[0],
+          end[1],
+          end[0] - Math.cos(tangentAngle - 0.55) * 9,
+          end[1] - Math.sin(tangentAngle - 0.55) * 9,
+          end[0],
+          end[1],
+          end[0] - Math.cos(tangentAngle + 0.55) * 9,
+          end[1] - Math.sin(tangentAngle + 0.55) * 9,
+        ]}
+        stroke={color}
+        strokeWidth={3}
+        lineCap="round"
+        lineJoin="round"
+      />
+    </Group>
+  );
+}
+
+function buildTurnArcPoints(startDeg: number, diffDeg: number, radius: number): number[] {
+  const steps = Math.max(6, Math.ceil(Math.abs(diffDeg) / 18));
+  const points: number[] = [];
+  for (let index = 0; index <= steps; index++) {
+    const angleDeg = startDeg + (diffDeg * index) / steps;
+    const angleRad = (angleDeg * Math.PI) / 180;
+    points.push(Math.cos(angleRad) * radius, -Math.sin(angleRad) * radius);
+  }
+  return points;
+}
+
+function shortestTurnDeg(startDeg: number, targetDeg: number): number {
+  let diff = ((targetDeg - startDeg + 180) % 360) - 180;
+  if (diff < -180) diff += 360;
+  return diff;
 }

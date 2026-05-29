@@ -20,8 +20,11 @@ export default function PathEditorClient() {
       <aside className="w-64 shrink-0 overflow-hidden border-r border-[var(--editor-border)] bg-[var(--editor-panel)]">
         <PosePanel
           paths={editor.state.paths}
+          turns={editor.state.turns}
+          favoritePoseIds={editor.state.favoritePoseIds}
           activePathId={editor.state.activePathId}
           selectedPoseId={editor.selectedPoseId}
+          selectedTurnId={editor.selectedTurnId}
           showPoseLabels={editor.state.showPoseLabels}
           onToggleLabels={() =>
             editor.commit((current) => ({
@@ -30,8 +33,12 @@ export default function PathEditorClient() {
             }))
           }
           onSelectPose={editor.selectPose}
+          onSelectTurn={editor.selectTurn}
+          onToggleFavoritePose={editor.toggleFavoritePose}
+          onUseFavoritePose={editor.useFavoritePose}
           onRename={(pathId, poseId, name) => editor.patchPose(pathId, poseId, { name })}
           onPatchPose={(pathId, poseId, patch) => editor.patchPose(pathId, poseId, patch)}
+          onPatchTurn={editor.patchTurn}
           onArcShortcutHint={editor.showArcShortcutHint}
         />
       </aside>
@@ -50,12 +57,14 @@ export default function PathEditorClient() {
               ) : null}
               <PathEditorCanvas
                 builtPaths={editor.builtPaths}
+                turns={editor.state.turns}
                 activePathId={editor.state.activePathId}
                 selectedPoseId={editor.selectedPoseId}
                 selectedPathId={
                   editor.state.selection?.type === "path" ? editor.state.selection.pathId : ""
                 }
                 selectedActionId={editor.selectedActionId}
+                selectedTurnId={editor.selectedTurnId}
                 pendingHeadingPoseId={editor.pendingHeadingPoseId}
                 showPoseLabels={editor.state.showPoseLabels}
                 canvasSize={editor.canvasSize}
@@ -64,6 +73,7 @@ export default function PathEditorClient() {
                 onFieldDoubleClick={editor.handleFieldDoubleClick}
                 onSelectPose={editor.selectPose}
                 onSelectAction={editor.selectAction}
+                onSelectTurn={editor.selectTurn}
                 onBeginDrag={editor.beginDrag}
                 onBeginPathDrag={editor.beginPathDrag}
                 onPathDrag={editor.handlePathDrag}
@@ -75,6 +85,8 @@ export default function PathEditorClient() {
                 onCallbackDrag={editor.handleCallbackDrag}
                 onCallbackDragEnd={editor.handleCallbackDragEnd}
                 onCallbackDelete={editor.removeAction}
+                onTurnDrag={editor.handleTurnDrag}
+                onTurnDragEnd={editor.handleTurnDragEnd}
                 onHeadingDrag={editor.handleHeadingDrag}
                 onHeadingDragEnd={editor.handleHeadingDragEnd}
               />
@@ -102,17 +114,27 @@ export default function PathEditorClient() {
       >
         <PathPanel
           paths={editor.state.paths}
+          turns={editor.state.turns}
           builtPaths={editor.builtPaths}
+          favoritePoses={editor.favoritePoses}
           activePathId={editor.state.activePathId}
+          selectedPathId={
+            editor.state.selection?.type === "path" ? editor.state.selection.pathId : ""
+          }
+          selectedTurnId={editor.selectedTurnId}
           canUndo={editor.history.past.length > 0}
           canRedo={editor.history.future.length > 0}
           onUndo={editor.undo}
           onRedo={editor.redo}
           onAddPath={editor.addPath}
+          onAddTurn={editor.addTurn}
           onDeletePath={editor.deletePath}
+          onDeleteTurn={editor.deleteTurn}
           onMovePath={editor.movePath}
           onActivatePath={editor.selectPath}
+          onActivateTurn={editor.selectTurn}
           onPatchPath={editor.patchPath}
+          onPatchTurn={editor.patchTurn}
           onAddAction={editor.addAction}
           onPatchAction={editor.patchAction}
           onRemoveAction={editor.removeAction}

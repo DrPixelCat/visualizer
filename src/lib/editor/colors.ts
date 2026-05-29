@@ -54,4 +54,5 @@ export const editorColorVars: CSSProperties & Record<EditorColorVariable, string
   "--editor-text-muted": editorColors.textMuted,
   "--editor-text-subtle": editorColors.textSubtle,
   "--editor-danger-text": editorColors.dangerText,
+  "--editor-canvas-path": editorColors.canvasPath,
 };

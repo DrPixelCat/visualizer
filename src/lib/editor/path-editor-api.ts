@@ -1,5 +1,5 @@
 import { InterpolationStyle } from "@/lib/geometry";
-import type { BuiltPath, EditorPath, EditorPose } from "@/lib/editor/path-editor-types";
+import type { BuiltPath, EditorPath, EditorPose, EditorTurn } from "@/lib/editor/path-editor-types";
 
 // Converts editor state into the Java-style fluent API preview.
 export function formatStyle(style: InterpolationStyle): string {
@@ -9,60 +9,77 @@ export function formatStyle(style: InterpolationStyle): string {
     .join(" ");
 }
 
-export function buildAllApiPreview(paths: EditorPath[], builtPaths: BuiltPath[]): string {
+export function buildAllApiPreview(
+  paths: EditorPath[],
+  turns: EditorTurn[],
+  builtPaths: BuiltPath[],
+  favoritePoses: EditorPose[] = [],
+): string {
   const usedNames = new Set<string>();
-  return paths
+  const pathVariables = new Map<string, string>();
+  const favoriteVariables = new Map<string, string>();
+  const factoryLines = [
+    "private final DistUnit distUnit = DistUnit.IN;",
+    "private final AngleUnit angleUnit = AngleUnit.DEG;",
+    "public PoseFactory pose = new PoseFactory(distUnit, angleUnit);",
+  ];
+  const favoriteLines = favoritePoses.map((pose) => {
+    const base = /^pose\d+$/i.test(pose.name) ? "favoritePose" : toCamelIdentifier(pose.name);
+    const variable = uniqueName(base || "favoritePose", usedNames);
+    favoriteVariables.set(pose.id, variable);
+    return `Pose ${variable} = ${formatFavoritePose(pose)};`;
+  });
+  const pathLines = paths
     .map((path, index) => {
       const built = builtPaths.find((item) => item.path.id === path.id);
       const variable = uniqueName(toCamelIdentifier(path.name) || `path${index + 1}`, usedNames);
-      return buildApiPreview(path, built?.segment?.getLengthIn() ?? 0, variable);
-    })
-    .join("\n\n");
+      pathVariables.set(path.id, variable);
+      return buildApiPreview(path, built?.segment?.getLengthIn() ?? 0, variable, favoriteVariables);
+    });
+  const turnLines = turns.map((turn, index) => {
+    const variable = uniqueName(toCamelIdentifier(turn.name) || `turn${index + 1}`, usedNames);
+    return buildTurnPreview(turn, variable, pathVariables);
+  });
+  return [factoryLines.join("\n"), ...favoriteLines, ...pathLines, ...turnLines].join("\n\n");
 }
 
-function buildApiPreview(path: EditorPath, lengthIn: number, variableName: string): string {
+function buildApiPreview(
+  path: EditorPath,
+  lengthIn: number,
+  variableName: string,
+  favoriteVariables: Map<string, string>,
+): string {
   const [startPose, ...controlPoses] = path.poses;
-  const lines = [`Path ${variableName} = new PathBuilder(${formatStartPose(startPose)})`];
+  const lines = [
+    `Path ${variableName} = new PathBuilder(${formatPose(startPose, true, favoriteVariables)})`,
+  ];
 
   lines.push("  .addControlPoints(");
   controlPoses.forEach((pose, index) => {
     const suffix = index === controlPoses.length - 1 ? "" : ",";
     const isEndPose = index === controlPoses.length - 1;
-    lines.push(`    ${formatControlPose(pose, isEndPose)}${suffix}`);
+    lines.push(`    ${formatPose(pose, isEndPose, favoriteVariables)}${suffix}`);
   });
   lines.push("  )");
 
-  if (
-    path.interpolation === InterpolationStyle.TANGENT_OPTIMAL ||
-    path.interpolation === InterpolationStyle.TANGENT_FORWARD
-  ) {
+  if (path.interpolation === InterpolationStyle.TANGENT_CUSTOM) {
     lines.push(
-      `  .interpolateWith(new HeadingInterpolator(InterpolationStyle.${path.interpolation}))`,
-    );
-  } else if (path.interpolation === InterpolationStyle.CONSTANT_START_HEADING) {
-    lines.push(
-      "  .interpolateWith(new HeadingInterpolator(InterpolationStyle.CONSTANT_START_HEADING))",
-    );
-  } else if (path.interpolation === InterpolationStyle.CONSTANT_END_HEADING) {
-    lines.push(
-      "  .interpolateWith(new HeadingInterpolator(InterpolationStyle.CONSTANT_END_HEADING))",
-    );
-  } else if (path.interpolation === InterpolationStyle.TANGENT_CUSTOM) {
-    lines.push(
-      `  .interpolateWith(new HeadingInterpolator(InterpolationStyle.TANGENT_CUSTOM, Angle.fromDeg(${formatNumber(path.tangentOffsetDeg)})))`,
+      `  .interpolateWith(InterpolationStyle.TANGENT_CUSTOM, Angle.fromDeg(${formatNumber(path.tangentOffsetDeg)}))`,
     );
   } else if (path.interpolation === InterpolationStyle.CUSTOM_DIST_FUNCTION) {
     lines.push(`  .interpolateWith(${path.customFunctionSource})`);
+  } else {
+    lines.push(`  .interpolateWith(InterpolationStyle.${path.interpolation})`);
   }
 
   path.actions.forEach((action) => {
-    if (action.type === "callback") {
+    if (action.type === "distanceCallback") {
       const s = lengthIn <= 1e-9 ? 0 : action.distanceIn / lengthIn;
-      lines.push(`  .addCallback(${s.toFixed(3)}, this::${safeMethodName(action.label)})`);
-    } else if (action.type === "turn") {
-      lines.push(`  .turnTo(Angle.fromDeg(${formatNumber(action.headingDeg)}))`);
+      lines.push(`  .addDistanceCallback(${s.toFixed(3)}, this::${safeMethodName(action.label)})`);
     } else {
-      lines.push(`  .holdPose(${formatNumber(action.durationSeconds)})`);
+      lines.push(
+        `  .addAngularCallback(Angle.fromDeg(${formatNumber(action.angleDeg)}), this::${safeMethodName(action.label)})`,
+      );
     }
   });
 
@@ -70,21 +87,50 @@ function buildApiPreview(path: EditorPath, lengthIn: number, variableName: strin
   return lines.join("\n");
 }
 
-function formatStartPose(pose: EditorPose): string {
-  const heading = pose.headingDeg ?? 0;
-  return `pose.build(${formatNumber(pose.x)}, ${formatNumber(pose.y)}, ${formatNumber(heading)})`;
+function buildTurnPreview(
+  turn: EditorTurn,
+  variableName: string,
+  pathVariables: Map<string, string>,
+): string {
+  const sourcePath = turn.sourcePathId ? pathVariables.get(turn.sourcePathId) : null;
+  const startPose = sourcePath ? `${sourcePath}.getEndPose()` : formatTurnStartPose(turn);
+
+  return [
+    `Turn ${variableName} = new TurnBuilder(${startPose})`,
+    `  .turnTo(Angle.fromDeg(${formatNumber(turn.targetHeadingDeg)}))`,
+    "  .build();",
+  ].join("\n");
 }
 
-function formatControlPose(pose: EditorPose, includeHeading: boolean): string {
+function formatTurnStartPose(turn: EditorTurn): string {
+  return `pose.of(${formatNumber(turn.x)}, ${formatNumber(turn.y)}, ${formatNumber(turn.startHeadingDeg)})`;
+}
+
+function formatFavoritePose(pose: EditorPose): string {
   if (pose.kind === "arc") {
-    return `pose.arcPoseAt(${formatNumber(pose.x)}, ${formatNumber(pose.y)}, ${formatNumber(pose.radius)})`;
+    return `pose.arcPoseOf(${formatNumber(pose.x)}, ${formatNumber(pose.y)}, ${formatNumber(pose.radius)})`;
+  }
+  return formatPose(pose, true, new Map());
+}
+
+function formatPose(
+  pose: EditorPose,
+  includeHeading: boolean,
+  favoriteVariables: Map<string, string>,
+): string {
+  const favoriteVariable = favoriteVariables.get(pose.id);
+  if (favoriteVariable) return favoriteVariable;
+
+  if (pose.kind === "arc" && !includeHeading) {
+    return `pose.arcPoseOf(${formatNumber(pose.x)}, ${formatNumber(pose.y)}, ${formatNumber(pose.radius)})`;
   }
 
   if (!includeHeading || pose.headingDeg === null) {
-    return `pose.at(${formatNumber(pose.x)}, ${formatNumber(pose.y)})`;
+    return `pose.of(${formatNumber(pose.x)}, ${formatNumber(pose.y)})`;
   }
 
-  return `pose.at(${formatNumber(pose.x)}, ${formatNumber(pose.y)}, ${formatNumber(pose.headingDeg)})`;
+  const heading = pose.headingDeg ?? 0;
+  return `pose.of(${formatNumber(pose.x)}, ${formatNumber(pose.y)}, ${formatNumber(heading)})`;
 }
 
 function formatNumber(value: number): string {

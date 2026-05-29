@@ -1,0 +1,2084 @@
+API BUILDING:
+
+package paths.builders;
+
+import paths.movements.FollowerMovement;
+
+/**
+ * A generic interface for all navigational builders.
+ * * @param <T> The specific type of FollowerMovement this builder constructs (e.g., Path, Turn).
+ */
+public interface MovementBuilder<T extends FollowerMovement> {
+
+    /**
+     * Compiles all configuration data and returns the executable movement.
+     * @return The constructed FollowerMovement.
+     */
+    T build();
+}
+
+package paths.builders;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Function;
+
+import paths.movements.Path;
+import paths.callbacks.AngleCallback;
+import paths.callbacks.DistanceCallback;
+import geometry.BSpline;
+import geometry.PathSegment;
+import paths.heading.HeadingInterpolator;
+import paths.heading.InterpolationStyle;
+import geometry.Angle;
+import geometry.Vector;
+import geometry.ArcPose;
+import geometry.Pose;
+
+/**
+ * A builder class designed to construct a {@link Path} fluently.
+ * <p>
+ * This class captures path configurations (waypoints, interpolators, callbacks)
+ * in any order and defers geometric compilation until {@link #build()} is called.
+ * C2 (tangent and acceleration) continuity is guaranteed in this builder.
+ * <p>
+ * @author DrPixelCat
+ * @author Sohum Arora 22985 Paraducks
+ */
+public class PathBuilder {
+    public Path path;
+
+    // State Tracking
+    private final Pose segmentStartPose;
+    private Pose expectedEndPose;
+    private Pose[] rawPoses = null;
+
+    private InterpolationStyle currentStyle = InterpolationStyle.SMOOTH_START_TO_END;
+    private Angle customOffset = null;
+    private Function<Double, Angle> customFunction = null;
+
+    // Stores callbacks to be validated and attached during the build process
+    private final List<Runnable> buildTasks = new ArrayList<>();
+
+    /**
+     * Initializes the PathBuilder with the starting location and heading of the robot.
+     *
+     * @param startPose The initial Pose of the robot at the beginning of the path.
+     */
+    public PathBuilder(Pose startPose) {
+        this.path = new Path();
+        this.segmentStartPose = startPose;
+    }
+
+    /**
+     * Stores a sequence of control points to define a continuous Uniform Cubic B-Spline.
+     * Any {@link ArcPose} provided is dynamically split into two adjacent control points to round sharp corners.
+     * <p>
+     * Note: Geometric processing is deferred until {@link #build()} is called.
+     *
+     * @param poses A variable number of waypoints/control points.
+     * @return The current PathBuilder instance for method chaining.
+     * @throws IllegalArgumentException If endpoints are arc poses or insufficient points are provided.
+     * @throws IllegalStateException If control points have already been added to this builder.
+     */
+    public PathBuilder addControlPoints(Pose... poses) {
+        if (this.rawPoses != null) {
+            throw new IllegalStateException("Control points have already been added to this builder!");
+        }
+        if (poses.length < 2) {
+            throw new IllegalArgumentException("A B-Spline must be created with > 1 points!");
+        }
+        if (poses[0] instanceof ArcPose || poses[poses.length - 1] instanceof ArcPose) {
+            throw new IllegalArgumentException("Endpoints can't be arcs!");
+        }
+
+        this.rawPoses = poses;
+        this.expectedEndPose = poses[poses.length - 1];
+
+        return this;
+    }
+
+    /**
+     * Overrides the default (SMOOTH_START_TO_END) interpolation with a different {@link InterpolationStyle}
+     *
+     * @param style The interpolation style to apply.
+     * @return The current PathBuilder instance for method chaining.
+     */
+    public PathBuilder interpolateWith(InterpolationStyle style) {
+        this.currentStyle = style;
+        return this;
+    }
+
+    /**
+     * Overrides the interpolation style, providing a custom angular offset.
+     * Used primarily for {@link InterpolationStyle#TANGENT_CUSTOM}.
+     *
+     * @param style The interpolation style to apply.
+     * @param angleOffset The fixed angle to offset the calculation by.
+     * @return The current PathBuilder instance for method chaining.
+     */
+    public PathBuilder interpolateWith(InterpolationStyle style, Angle angleOffset) {
+        this.currentStyle = style;
+        this.customOffset = angleOffset;
+        return this;
+    }
+
+    /**
+     * Overrides the default interpolation with a custom function of distance percentage (s).
+     *
+     * @param function A lambda mapping distance percentage [0.0, 1.0] to a target Angle.
+     * @return The current PathBuilder instance for method chaining.
+     */
+    public PathBuilder interpolateWith(Function<Double, Angle> function) {
+        this.currentStyle = InterpolationStyle.CUSTOM_DIST_FUNCTION;
+        this.customFunction = function;
+        return this;
+    }
+
+    /**
+     * Attaches an executable callback based on the physical distance percentage.
+     *
+     * @param s The physical distance percentage [0.0, 1.0].
+     * @param action The code to execute.
+     * @return The current PathBuilder instance for method chaining.
+     */
+    public PathBuilder addDistanceCallback(double s, Runnable action) {
+        buildTasks.add(() -> path.addCallback(new DistanceCallback(s, action)));
+        return this;
+    }
+
+    /**
+     * Attaches an executable callback based on the robot reaching a target heading.
+     *
+     * @param angle The Angle at which the callback should trigger.
+     * @param action The code to execute.
+     * @return The current PathBuilder instance for method chaining.
+     */
+    public PathBuilder addAngularCallback(Angle angle, Runnable action) {
+        buildTasks.add(() -> {
+            // We can only definitively pre-calculate boundary sweeps for SMOOTH lerping.
+            // Tangent and Custom interpolators sweep dynamically based on curve integration,
+            // so we bypass the strict bounds check to prevent falsely crashing the user's build.
+            if (currentStyle == InterpolationStyle.SMOOTH_START_TO_END) {
+                double startRad = segmentStartPose.getHeading().getRad();
+                double endRad = expectedEndPose.getHeading().getRad();
+
+                if (Double.isFinite(startRad) && Double.isFinite(endRad)) {
+                    double targetRad = angle.getRad();
+
+                    double totalDiff = getShortestAngularDifference(startRad, endRad);
+                    double targetDiff = getShortestAngularDifference(startRad, targetRad);
+
+                    if (Math.abs(totalDiff) < 1e-6) {
+                        if (Math.abs(targetDiff) > 1e-6) {
+                            throw new IllegalArgumentException("Angular callback out of bounds: The path's target heading is constant.");
+                        }
+                    } else if ((totalDiff * targetDiff < 0) || (Math.abs(targetDiff) > Math.abs(totalDiff))) {
+                        throw new IllegalArgumentException("Angular callback is outside the sweep range of the start and end headings.");
+                    }
+                }
+            }
+            path.addCallback(new AngleCallback(angle, action));
+        });
+
+        return this;
+    }
+
+    /**
+     * Compiles all configuration data, calculates new ctrl points from {@link ArcPose}, generates the curve,
+     * verifies callback safety, and returns the completed executable Path.
+     *
+     * @return The fully constructed {@link Path} object ready for execution.
+     */
+    public Path build() {
+        if (rawPoses == null) {
+            throw new IllegalStateException("Cannot build path: No control points were added!");
+        }
+
+        // 1. Pre-process the points (Expand ArcPoses)
+        ArrayList<Pose> processedPoses = new ArrayList<>(rawPoses.length * 2);
+        processedPoses.add(rawPoses[0]);
+
+        boolean intermediateWarningSent = false;
+
+        for (int i = 1; i < rawPoses.length - 1; i++) {
+            Pose currentPose = rawPoses[i];
+
+            if (!intermediateWarningSent && Double.isFinite(currentPose.getHeading().getRad())) {
+                path.addWarning("APEX WARNING: Intermediate B-Spline headings are ignored! Only the " +
+                        "final pose heading controls the end heading.");
+                intermediateWarningSent = true;
+            }
+
+            if (currentPose instanceof ArcPose) {
+                ArcPose arcPose = (ArcPose) currentPose;
+                double radius = arcPose.getRadius().getIn();
+
+                if (radius < 2.0) {
+                    throw new IllegalArgumentException("ArcPose radius must be at least 2.0 inches.");
+                }
+
+                Pose prevPose = rawPoses[i - 1];
+                Pose nextPose = rawPoses[i + 1];
+
+                Vector vecToLast = prevPose.getPos().minus(arcPose.getPos());
+                Vector vecToNext = nextPose.getPos().minus(arcPose.getPos());
+
+                double distToLast = vecToLast.getMag().getIn();
+                double distToNext = vecToNext.getMag().getIn();
+
+                if (radius > distToLast) {
+                    throw new IllegalArgumentException("ArcPose radius (" + radius + ") exceeds distance to the last control point.");
+                } else if (radius > distToNext) {
+                    throw new IllegalArgumentException("ArcPose radius (" + radius + ") exceeds distance to the next control point.");
+                }
+
+                Vector p1Vec = arcPose.getPos().plus(vecToLast.times(radius / distToLast));
+                Vector p2Vec = arcPose.getPos().plus(vecToNext.times(radius / distToNext));
+
+                processedPoses.add(new Pose(p1Vec, arcPose.getHeading()));
+                processedPoses.add(currentPose);
+                processedPoses.add(new Pose(p2Vec, arcPose.getHeading()));
+
+            } else {
+                processedPoses.add(currentPose);
+            }
+        }
+
+        processedPoses.add(rawPoses[rawPoses.length - 1]);
+
+        // 2. Build the curve using the fully processed points
+        Vector[] vectors = new Vector[processedPoses.size() + 1];
+        vectors[0] = segmentStartPose.getPos(); // Inherit end of previous segment
+
+        for (int i = 0; i < processedPoses.size(); i++) {
+            vectors[i + 1] = processedPoses.get(i).getPos();
+        }
+
+        PathSegment curve = new PathSegment(new BSpline(vectors));
+        path.setParametricPath(curve);
+
+        // 3. Inject interpolator state
+        Angle startH = segmentStartPose.getHeading();
+        Angle endH = expectedEndPose.getHeading();
+
+        if (currentStyle == InterpolationStyle.CUSTOM_DIST_FUNCTION) {
+            path.setInterpolator(new HeadingInterpolator(customFunction));
+        } else {
+            boolean missingHeading = !Double.isFinite(startH.getRad()) || !Double.isFinite(endH.getRad());
+
+            if (missingHeading && currentStyle != InterpolationStyle.TANGENT_FORWARD && currentStyle != InterpolationStyle.TANGENT_CUSTOM) {
+                path.addWarning("APEX WARNING: Segment missing start/end heading! Falling back to TANGENT_FORWARD. Use pose.of(x, y, heading) to fix.");
+                currentStyle = InterpolationStyle.TANGENT_FORWARD;
+            }
+            path.setInterpolator(new HeadingInterpolator(currentStyle, startH, endH, customOffset));
+        }
+
+        // 4. Run deferred tasks (validating boundaries and attaching callbacks)
+        for (Runnable task : buildTasks) {
+            task.run();
+        }
+
+        return path;
+    }
+
+    private double getShortestAngularDifference(double from, double to) {
+        double diff = (to - from) % (2 * Math.PI);
+        if (diff > Math.PI) diff -= 2 * Math.PI;
+        else if (diff < -Math.PI) diff += 2 * Math.PI;
+        return diff;
+    }
+}
+
+package paths.builders;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Consumer;
+
+import paths.movements.Turn;
+import paths.callbacks.AngleCallback;
+import geometry.Angle;
+import geometry.Pose;
+
+/**
+ * A builder class designed to construct a {@link Turn} fluently.
+ * <p>
+ * This handles stationary point-turns, allowing users to inject mechanical
+ * callbacks at specific angles during the rotation.
+ */
+public class TurnBuilder implements MovementBuilder<Turn> {
+    private final Pose startPose;
+    private Angle targetHeading = null;
+
+    // Instead of a Runnable, we use a Consumer so we can pass the finalized Turn object into the lambda later
+    private final List<Consumer<Turn>> buildTasks = new ArrayList<>();
+
+    /**
+     * Initializes the TurnBuilder with the robot's starting state.
+     * @param startPose The Pose of the robot before the turn begins.
+     */
+    public TurnBuilder(Pose startPose) { this.startPose = startPose; }
+
+    /**
+     * Defines the target angle for the point turn.
+     * @param targetHeading The Angle to rotate to.
+     * @return The current TurnBuilder instance.
+     */
+    public TurnBuilder turnTo(Angle targetHeading) {
+        this.targetHeading = targetHeading;
+        return this;
+    }
+
+    /**
+     * Attaches an executable callback to trigger when the robot passes a specific angle during the turn.
+     *
+     * @param angle The angle at which the callback should trigger.
+     * @param action The code to execute.
+     * @return The current TurnBuilder instance.
+     */
+    public TurnBuilder addAngularCallback(Angle angle, Runnable action) {
+        // We define the validation math now, but wait to execute it until build() is called
+        buildTasks.add((finalTurn) -> {
+
+            double startRad = finalTurn.getStartPose().getHeading().getRad();
+            double endRad = finalTurn.getEndPose().getHeading().getRad();
+            double targetRad = angle.getRad();
+
+            double totalDiff = getShortestAngularDifference(startRad, endRad);
+            double targetDiff = getShortestAngularDifference(startRad, targetRad);
+
+            if (Math.abs(totalDiff) < 1e-6) {
+                if (Math.abs(targetDiff) > 1e-6) {
+                    throw new IllegalArgumentException("Callback out of bounds: The turn has no rotational distance.");
+                }
+            } else if ((totalDiff * targetDiff < 0) || (Math.abs(targetDiff) > Math.abs(totalDiff))) {
+                throw new IllegalArgumentException("Angular callback is outside the sweep range of this turn.");
+            }
+
+            finalTurn.addCallback(new AngleCallback(angle, action));
+        });
+
+        return this;
+    }
+
+    /**
+     * Compiles the turn, verifies callback bounds, and returns the executable Turn movement.
+     * @return The fully constructed {@link Turn}.
+     */
+    @Override
+    public Turn build() {
+        if (targetHeading == null) {
+            throw new IllegalStateException("Cannot build Turn: No target heading was specified! Use .turnTo().");
+        }
+
+        // Create the final, accurate Turn object
+        Turn finalTurn = new Turn(startPose, targetHeading);
+
+        // Execute all the deferred math and callback attachments, handing them the finalTurn object
+        for (Consumer<Turn> task : buildTasks) {
+            task.accept(finalTurn);
+        }
+
+        return finalTurn;
+    }
+
+    /**
+     * Helper method to calculate the shortest signed angular difference between two radians.
+     * Result is always in the range [-PI, PI].
+     */
+    private double getShortestAngularDifference(double from, double to) {
+        double diff = (to - from) % (2 * Math.PI);
+        if (diff > Math.PI) diff -= 2 * Math.PI;
+        else if (diff < -Math.PI) diff += 2 * Math.PI;
+        return diff;
+    }
+}
+
+CALLBACKS:
+
+package paths.callbacks;
+
+import geometry.Angle;
+
+public class AngleCallback implements Callback {
+    private final Angle theta;
+    private final Runnable action;
+    private boolean triggered = false;
+
+    public AngleCallback(Angle theta, Runnable action) {
+        this.theta = theta.normalized();
+        this.action = action;
+    }
+
+    public Angle getTheta() { return theta; }
+
+    @Override
+    public Runnable getAction() { return action; }
+
+    @Override
+    public boolean isTriggered() { return triggered; }
+
+    @Override
+    public void setTriggered(boolean triggered) { this.triggered = triggered; }
+}
+
+package paths.callbacks;
+
+public interface Callback {
+    /**
+     * Gets the action to be executed when the callback condition is met.
+     */
+    Runnable getAction();
+
+    /**
+     * Checks if the callback has already been triggered.
+     */
+    boolean isTriggered();
+
+    /**
+     * Sets the triggered state of the callback.
+     */
+    void setTriggered(boolean triggered);
+}
+
+package paths.callbacks;
+
+import com.qualcomm.robotcore.util.Range;
+
+public class DistanceCallback implements Callback {
+    private final double s;
+    private final Runnable action;
+    private boolean triggered = false;
+
+    public DistanceCallback(double s, Runnable action) {
+        this.s = Range.clip(s, 0.0, 1.0);
+        this.action = action;
+    }
+
+    public double getS() {
+        return s;
+    }
+
+    @Override
+    public Runnable getAction() {
+        return action;
+    }
+
+    @Override
+    public boolean isTriggered() { // Changed to public
+        return triggered;
+    }
+
+    @Override
+    public void setTriggered(boolean triggered) { // Changed to public
+        this.triggered = triggered;
+    }
+}
+
+HEADING INTERPOLATION:
+
+package paths.heading;
+
+import geometry.Angle;
+import geometry.Vector;
+import java.util.function.Function;
+
+/**
+ * Calculates and manages the target heading of the robot along a path segment.
+ * <p>
+ * This class is constructed seamlessly by the Builder and evaluates the
+ * mathematical target heading dynamically based on the active {@link InterpolationStyle}.
+ * <p>
+ * Author: DrPixelCat
+ */
+public class HeadingInterpolator {
+
+    private final InterpolationStyle style;
+
+    // State parameters
+    private Angle startHeading;
+    private Angle endHeading;
+    private Angle customOffset;
+    private Function<Double, Angle> customFunction;
+
+    /**
+     * Unified constructor for standard interpolation styles.
+     * The switch case in getHeading() inherently ignores variables not required for its specific math.
+     */
+    public HeadingInterpolator(InterpolationStyle style, Angle startHeading, Angle endHeading, Angle customOffset) {
+        this.style = style;
+        this.startHeading = startHeading != null ? startHeading.copy() : null;
+        this.endHeading = endHeading != null ? endHeading.copy() : null;
+        this.customOffset = customOffset != null ? customOffset.copy() : null;
+    }
+
+    /**
+     * Constructor specifically for custom user-defined heading profiles.
+     */
+    public HeadingInterpolator(Function<Double, Angle> customFunction) {
+        this.style = InterpolationStyle.CUSTOM_DIST_FUNCTION;
+        this.customFunction = customFunction;
+    }
+
+    /**
+     * Calculates the target heading for the robot based on the current interpolation style.
+     *
+     * @param s The distance percentage along the segment [0.0, 1.0]
+     * @param pathTangent The 2D forward tangent vector of the path at 's'
+     * @return The target Angle the robot should face
+     */
+    public Angle getHeading(double s, Vector pathTangent) {
+        switch (style) {
+            case CONSTANT_START_HEADING:
+                return startHeading.copy();
+
+            case CONSTANT_END_HEADING:
+                return endHeading.copy();
+
+            case TANGENT_FORWARD:
+                return pathTangent.getTheta();
+
+            case TANGENT_CUSTOM:
+                return pathTangent.getTheta().plus(customOffset);
+
+            case TANGENT_OPTIMAL:
+                return calculateOptimalTangent(pathTangent);
+
+            case SMOOTH_START_TO_END:
+                return calculateShortestPathLerp(s);
+
+            case CUSTOM_DIST_FUNCTION:
+                return customFunction.apply(s);
+
+            default:
+                throw new IllegalStateException("Unhandled heading interpolation style: " + style.name());
+        }
+    }
+
+    /**
+     * Aligns with the tangent, but chooses the direction (forward or backward)
+     * that minimizes the TOTAL angular travel (entry turn + exit turn).
+     */
+    private Angle calculateOptimalTangent(Vector tangent) {
+        Angle forwardTangent = tangent.getTheta();
+        Angle backwardTangent = forwardTangent.plus(Angle.fromRad(Math.PI));
+
+        // Total rotation cost if drive forward
+        double entryCostFwd = Math.abs(getShortestAngularDifference(startHeading, forwardTangent));
+        double exitCostFwd  = Math.abs(getShortestAngularDifference(forwardTangent, endHeading));
+        double totalCostFwd = entryCostFwd + exitCostFwd;
+
+        // Total rotation cost if drive backward
+        double entryCostBwd = Math.abs(getShortestAngularDifference(startHeading, backwardTangent));
+        double exitCostBwd  = Math.abs(getShortestAngularDifference(backwardTangent, endHeading));
+        double totalCostBwd = entryCostBwd + exitCostBwd;
+
+        // Pick the orientation with the smallest total rotational requirement
+        return totalCostBwd < totalCostFwd ? backwardTangent : forwardTangent;
+    }
+
+    /**
+     * Interpolates between startHeading and endHeading via the shortest rotational path,
+     * applying a cubic ease-in-out profile so rotational acceleration does not instantly spike.
+     */
+    private Angle calculateShortestPathLerp(double s) {
+        s = Math.max(0.0, Math.min(1.0, s));
+
+        // Apply a Cubic Smoothstep (Ease-In-Out) profile to 's'
+        // Equation: f(s) = 3s^2 - 2s^3
+        double profiledS = (3.0 * s * s) - (2.0 * s * s * s);
+
+        double diffRad = getShortestAngularDifference(startHeading, endHeading);
+        double targetRad = startHeading.getRad() + (diffRad * profiledS);
+
+        return Angle.fromRad(targetRad);
+    }
+
+    /**
+     * Calculates the shortest signed angular difference between two angles in radians.
+     * Result is always in the range [-PI, PI].
+     */
+    private double getShortestAngularDifference(Angle from, Angle to) {
+        double diff = to.getRad() - from.getRad();
+
+        // Wrap the difference into the [-PI, PI] range
+        diff = (diff + Math.PI) % (2 * Math.PI) - Math.PI;
+        if (diff < -Math.PI) {
+            diff += 2 * Math.PI;
+        }
+        return diff;
+    }
+}
+
+package paths.heading;
+
+/**
+ * Defines the strategy used to calculate the robot's target heading (orientation)
+ * at any given distance percentage along a path segment.
+ * Author: DrPixelCat
+ */
+public enum InterpolationStyle {
+
+    /**
+     * The robot locks its heading to whatever the heading was at the start of the segment.
+     * Useful for pure strafing moves where the robot should not rotate.
+     */
+    CONSTANT_START_HEADING,
+
+    /**
+     * The robot immediately targets and locks to the heading defined at the end of the segment.
+     */
+    CONSTANT_END_HEADING,
+
+    /**
+     * The robot aligns its heading with the tangent of the path, but chooses the
+     * direction (forward, backward) that requires the least amount of rotation.
+     */
+    TANGENT_OPTIMAL,
+
+    /**
+     * The robot strictly faces the forward direction of travel along the path
+     * at all times, driving like a standard car.
+     */
+    TANGENT_FORWARD,
+
+    /**
+     * The robot follows the tangent of the path but with a fixed angular offset
+     * (e.g., pointing 90 degrees away from the path).
+     */
+    TANGENT_CUSTOM,
+
+    /**
+     * The robot smoothly interpolates its heading from the starting angle to the
+     * ending angle as it travels the segment (usually a linear interpolation based on 't').
+     */
+    SMOOTH_START_TO_END,
+
+    /**
+     * The heading is controlled by a custom user-defined function or curve,
+     * allowing for complex heading profiles completely independent of the path's shape.
+     */
+    CUSTOM_DIST_FUNCTION
+}
+
+MOVEMENTS:
+
+package paths.movements;
+
+import geometry.Pose;
+
+/**
+ * A marker interface representing any executable navigational action
+ * (e.g., driving a spline path, executing a point turn, or holding a pose).
+ * <p>
+ * Your Follower class will maintain a queue or list of these movements
+ * and execute them sequentially.
+ */
+public interface FollowerMovement {
+
+    /**
+     * Gets the expected final pose of the robot after this movement is completed.
+     * This is critical for linking sequential builders together!
+     * @return The final Pose.
+     */
+    Pose getEndPose();
+}
+
+package paths.movements;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import paths.callbacks.Callback;
+import paths.heading.HeadingInterpolator;
+import geometry.PathSegment;
+import geometry.Pose;
+
+/**
+ * Represents a complete, navigable geometric route for the robot to follow.
+ * <p>
+ * A {@code Path} encapsulates a continuous parametric curve (e.g., a B-Spline),
+ * its associated heading interpolation strategy, and any scheduled mechanical
+ * callbacks triggered along the route.
+ * <p>
+ * @author DrPixelCat
+ * @author Sohum Arora 22985 Paraducks
+ */
+public class Path implements FollowerMovement {
+    private final List<String> buildWarnings = new ArrayList<>();
+    private final ArrayList<Callback> callbacks = new ArrayList<>();
+
+    private PathSegment parametricPath;
+    private HeadingInterpolator interpolator;
+    private Pose endPose;
+
+    /**
+     * Attaches an executable mechanical/software action to this path.
+     * * @param callback The callback object defining the trigger point and executable action.
+     */
+    public void addCallback(Callback callback) { callbacks.add(callback); }
+
+    /**
+     * Retrieves all scheduled actions attached to this path.
+     * * @return An array of callbacks scheduled along the route.
+     */
+    public Callback[] getCallbacks() { return callbacks.toArray(new Callback[0]); }
+
+    /**
+     * Sets the final target pose (coordinates and heading) of this path.
+     * * @param endPose The geometric terminus of the route.
+     */
+    public void setEndPose(Pose endPose) { this.endPose = endPose; }
+
+    /**
+     * Retrieves the final target pose of this path.
+     * * @return The geometric terminus of the route.
+     */
+    public Pose getEndPose() { return endPose; }
+
+    /**
+     * Injects the calculated geometric curve (e.g., a B-Spline) that defines
+     * the physical route the robot will drive.
+     * * @param parametricPath The compiled path segment.
+     */
+    public void setParametricPath(PathSegment parametricPath) {
+        this.parametricPath = parametricPath;
+    }
+
+    /**
+     * Retrieves the geometric curve defining the physical route.
+     * * @return The compiled path segment.
+     */
+    public PathSegment getParametricPath() { return parametricPath; }
+
+    /**
+     * Injects the strategy used to calculate the robot's target heading
+     * at any point along the curve.
+     * * @param interpolator The heading generation strategy.
+     */
+    public void setInterpolator(HeadingInterpolator interpolator) {
+        this.interpolator = interpolator;
+    }
+
+    /**
+     * Retrieves the heading strategy for this path.
+     * * @return The heading interpolator.
+     */
+    public HeadingInterpolator getInterpolator() { return interpolator; }
+
+    /**
+     * Logs a non-fatal warning generated during the path building process
+     * (e.g., missing headings, ignored waypoints).
+     * <p>
+     * Duplicate warnings are ignored to prevent telemetry spam on the driver station.
+     *
+     * @param warning The localized warning string.
+     */
+    public void addWarning(String warning) {
+        if (!buildWarnings.contains(warning)) {
+            buildWarnings.add(warning);
+        }
+    }
+
+    /**
+     * Retrieves an unmodifiable view of all warnings generated during path construction.
+     * These should be pushed to the driver station telemetry during initialization.
+     *
+     * @return A read-only list of warning strings.
+     */
+    public List<String> getWarnings() {
+        // Return an unmodifiable view to prevent external modification of the internal list
+        return Collections.unmodifiableList(buildWarnings);
+    }
+}
+
+package paths.movements;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import paths.callbacks.Callback;
+import geometry.Angle;
+import geometry.Pose;
+
+/**
+ * Represents a stationary point-turn movement.
+ * <p>
+ * The robot will remain at its starting (x, y) coordinates and rotate
+ * to the specified target heading.
+ */
+public class Turn implements FollowerMovement {
+    private final Pose startPose;
+    private final Pose endPose;
+    private final List<Callback> callbacks = new ArrayList<>();
+
+    /**
+     * Constructs a Turn movement.
+     * @param startPose The robot's state at the beginning of the turn.
+     * @param targetHeading The final angle the robot should face.
+     */
+    public Turn(Pose startPose, Angle targetHeading) {
+        this.startPose = startPose;
+        // The end pose shares the same X/Y, but updates the heading
+        this.endPose = new Pose(startPose.getPos(), targetHeading);
+    }
+
+    public void addCallback(Callback callback) { callbacks.add(callback); }
+
+    public Callback[] getCallbacks() { return callbacks.toArray(new Callback[0]); }
+
+    public Pose getStartPose() { return startPose; }
+
+    @Override
+    public Pose getEndPose() { return endPose; }
+}
+
+API EXAMPLE:
+
+package paths.movements;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import paths.callbacks.Callback;
+import geometry.Angle;
+import geometry.Pose;
+
+/**
+ * Represents a stationary point-turn movement.
+ * <p>
+ * The robot will remain at its starting (x, y) coordinates and rotate
+ * to the specified target heading.
+ */
+public class Turn implements FollowerMovement {
+    private final Pose startPose;
+    private final Pose endPose;
+    private final List<Callback> callbacks = new ArrayList<>();
+
+    /**
+     * Constructs a Turn movement.
+     * @param startPose The robot's state at the beginning of the turn.
+     * @param targetHeading The final angle the robot should face.
+     */
+    public Turn(Pose startPose, Angle targetHeading) {
+        this.startPose = startPose;
+        // The end pose shares the same X/Y, but updates the heading
+        this.endPose = new Pose(startPose.getPos(), targetHeading);
+    }
+
+    public void addCallback(Callback callback) { callbacks.add(callback); }
+
+    public Callback[] getCallbacks() { return callbacks.toArray(new Callback[0]); }
+
+    public Pose getStartPose() { return startPose; }
+
+    @Override
+    public Pose getEndPose() { return endPose; }
+}
+
+package paths;
+
+import paths.builders.PathBuilder;
+import paths.builders.TurnBuilder;
+import paths.movements.FollowerMovement;
+import paths.movements.Path;
+import paths.movements.Turn;
+import paths.heading.InterpolationStyle;
+
+import geometry.Angle;
+import geometry.Pose;
+import util.AngleUnit;
+import util.DistUnit;
+import util.PoseFactory;
+
+public class FullAPIShowcase {
+    private final DistUnit distUnit = DistUnit.IN;
+    private final AngleUnit angleUnit = AngleUnit.DEG;
+    public PoseFactory pose = new PoseFactory(distUnit, angleUnit);
+    private Pose startPose;
+
+    // Routine movements stored in sequence
+    public Path smoothBlendPath;
+    public Path constStartPath;
+    public Path constEndPath;
+    public Turn callbackTurn;
+    public Path tangentForwardPath;
+    public Path tangentOptimalPath;
+    public Path tangentCustomPath;
+    public Path lambdaSpinPath;
+
+    public FullAPIShowcase(PoseFactory.Mirror mirror) {
+        pose.setMirror(mirror);
+        startPose = Pose.Common.CENTER.get(); // (0, 0, 0)
+        buildRoutine();
+    }
+
+    // region Dummy Actions
+    public void startIntake() { /* Starts intake motors */ }
+    public void deployOuttake() { /* Extends slides */ }
+    public void dropElement() { /* Opens claw */ }
+    public void finishRoutine() { /* Plays an LED animation */ }
+    // endregion
+
+    /**
+     * A comprehensive showcase of every InterpolationStyle in the API.
+     */
+    private void buildRoutine() {
+
+        // 1. SMOOTH_START_TO_END
+        // Blends the heading linearly from the start pose to the end pose.
+        smoothBlendPath = new PathBuilder(startPose)
+                .addControlPoints(
+                        pose.of(15, 0),
+                        pose.of(25, 15, 90) // Target heading is 90 degrees
+                )
+                .interpolateWith(InterpolationStyle.SMOOTH_START_TO_END)
+                .build();
+
+        // ---------------------------------------------------------
+
+        // 2. CONSTANT_START_HEADING
+        // The robot locks its orientation to whatever heading it had when this path started.
+        // Great for pure strafing. It will stay locked at 90 degrees from the previous path.
+        constStartPath = new PathBuilder(smoothBlendPath.getEndPose())
+                .addControlPoints(
+                        pose.of(25, 40),
+                        pose.of(45, 40, 180) // APEX WARNING: The 180 target is ignored due to CONSTANT_START_HEADING
+                )
+                .interpolateWith(InterpolationStyle.CONSTANT_START_HEADING)
+                .addDistanceCallback(0.5, this::startIntake)
+                .build();
+
+        // ---------------------------------------------------------
+
+        // 3. CONSTANT_END_HEADING
+        // The robot immediately targets the final heading of the segment and holds it for the whole curve.
+        constEndPath = new PathBuilder(constStartPath.getEndPose())
+                .addControlPoints(
+                        pose.of(60, 20),
+                        pose.of(60, 0, 270) // The robot will immediately pivot to face 270 while driving
+                )
+                .interpolateWith(InterpolationStyle.CONSTANT_END_HEADING)
+                .build();
+
+        // ---------------------------------------------------------
+
+        // 4. POINT TURN WITH ANGULAR CALLBACK
+        // Spins in place from 270 degrees up to 360/0 degrees.
+        callbackTurn = new TurnBuilder(constEndPath.getEndPose())
+                .turnTo(Angle.fromDeg(0))
+
+                // Triggers exactly when the robot sweeps past the 315-degree mark during the spin
+                .addAngularCallback(Angle.fromDeg(315), this::deployOuttake)
+                .build();
+
+        // ---------------------------------------------------------
+
+        // 5. TANGENT_FORWARD
+        // The robot strictly faces the forward direction of travel along the path (like a car).
+        tangentForwardPath = new PathBuilder(callbackTurn.getEndPose())
+                .addControlPoints(
+                        pose.of(80, 0),
+                        pose.of(100, 20, 90) // Target heading ignored; overridden by path tangent
+                )
+                .interpolateWith(InterpolationStyle.TANGENT_FORWARD)
+                .build();
+
+        // ---------------------------------------------------------
+
+        // 6. TANGENT_OPTIMAL
+        // Points either forward OR backward along the path depending on which requires less physical rotation.
+        tangentOptimalPath = new PathBuilder(tangentForwardPath.getEndPose())
+                .addControlPoints(
+                        pose.of(120, 20),
+                        pose.arcPoseOf(120, 0, 10), // Dynamically fillets this sharp corner
+                        pose.of(100, -20, 0)
+                )
+                .interpolateWith(InterpolationStyle.TANGENT_OPTIMAL)
+                .addDistanceCallback(0.8, this::dropElement)
+                .build();
+
+        // ---------------------------------------------------------
+
+        // 7. TANGENT_CUSTOM
+        // Follows the path tangent, but allows for a custom, fixed angular offset.
+        tangentCustomPath = new PathBuilder(tangentOptimalPath.getEndPose())
+                .addControlPoints(
+                        pose.of(80, -20),
+                        pose.of(60, 0, 0)
+                )
+                .interpolateWith(InterpolationStyle.TANGENT_CUSTOM, Angle.fromDeg(90))
+                // NOTE: Depending on your API implementation, you may need a method here to pass the custom offset angle!
+                .build();
+
+        // ---------------------------------------------------------
+
+        // 8. CUSTOM_DIST_FUNCTION (LAMBDA OVERRIDE)
+        // Complete mathematical control over the heading.
+        // This calculates a 360-degree tornado spin scaling with path progression (s).
+        lambdaSpinPath = new PathBuilder(tangentCustomPath.getEndPose())
+                .addControlPoints(
+                        pose.of(30, 0),
+                        pose.of(0, 0, 0)
+                )
+                // (s) represents the physical percentage along the path [0.0 to 1.0]
+                .interpolateWith(s -> Angle.fromDeg(s * 360.0))
+                .addDistanceCallback(1.0, this::finishRoutine)
+                .build();
+    }
+
+    /**
+     * Helper to retrieve the full, pre-compiled routine for the Follower's state machine.
+     */
+    public FollowerMovement[] getAutoRoutine() {
+        return new FollowerMovement[] {
+                smoothBlendPath,
+                constStartPath,
+                constEndPath,
+                callbackTurn,
+                tangentForwardPath,
+                tangentOptimalPath,
+                tangentCustomPath,
+                lambdaSpinPath
+        };
+    }
+}
+
+GEOMETRY HELPERS:
+
+package geometry;
+
+import android.annotation.SuppressLint;
+import androidx.annotation.NonNull;
+
+import util.AngleUnit;
+
+/**
+ * A class representing an angle that can be easily converted between {@link AngleUnit}s.
+ *
+ * @author Dylan B. - 18597 RoboClovers - Delta
+ */
+public final class Angle {
+    private final double radians;
+
+    // region Constructors and factory methods
+    // Private constructor to force use of the factory method
+    private Angle(double radians) { this.radians = radians; }
+
+    /** Creates an Angle from a specific unit. */
+    public static Angle of(double value, AngleUnit unit) { return new Angle(unit.toRadians(value)); }
+
+    /** Creates an Angle from degrees. */
+    public static Angle fromDeg(double degrees) { return of(degrees, AngleUnit.DEG); }
+
+    /** Creates an Angle from radians. */
+    public static Angle fromRad(double radians) { return of(radians, AngleUnit.RAD); }
+    // endregion
+
+    // region Getters
+    /** @return the angle value in the requested unit. */
+    public double get(AngleUnit unit) { return unit.fromRadians(this.radians); }
+
+    /** @return the angle in degrees. */
+    public double getDeg() { return get(AngleUnit.DEG); }
+
+    /** @return the angle in radians. */
+    public double getRad() { return this.radians; }
+    // endregion
+
+    // region Arithmetic operations
+    /** @return a new Angle that is the sum of this Angle and another one. */
+    public Angle plus(Angle other) { return new Angle(this.radians + other.radians); }
+
+    /** @return a new Angle that is the difference between this Angle and another one. */
+    public Angle minus(Angle other) { return new Angle(this.radians - other.radians); }
+    // endregion
+
+    // region Other operations and methods
+    /** @return a new Angle that is the mirror of this Angle across the X-axis. */
+    public Angle mirrorX() { return new Angle(-this.radians); }
+
+    /** @return a new Angle that is the mirror of this Angle across the Y-axis. */
+    public Angle mirrorY() { return new Angle(Math.PI - this.radians); }
+
+    /** Normalizes an angle in radians to the range [0, 2π]. */
+    public static double normalize(double radians) {
+        return (radians % (2 * Math.PI) + (2 * Math.PI)) % (2 * Math.PI);
+    }
+
+    /** @return a new Angle that is normalized to [0, 2π] radians */
+    public Angle normalized() { return new Angle(normalize(this.radians)); }
+
+    /** @return a copy of this Angle */
+    public Angle copy() { return new Angle(this.radians); }
+
+    @SuppressLint("DefaultLocale")
+    @Override
+    @NonNull
+    public String toString() { return String.format("%.3f rad", this.radians); }
+    // endregion
+}
+
+package geometry;
+
+/**
+ * Represents a specialized waypoint in a path that should be smoothed into an arc.
+ * <p>
+ * When passed into a path builder, an {@code ArcPose} acts as a marker indicating that
+ * the sharp corner at this location should be dynamically split and rounded.
+ * The {@code radius} defines how far from the corner the smoothing begins and ends.
+ *
+ * @author DrPixelCat
+ * @author Dylan B. - 18597 RoboClovers - Delta
+ */
+public class ArcPose extends Pose {
+    Dist radius;
+
+    /** Creates an ArcPose from a position Vector and a radius. */
+    public ArcPose(Vector position, Dist radius) {
+        super(position, Angle.fromRad(0)); this.radius = radius;
+    }
+
+    /** @return the radius of this ArcPose. */
+    public Dist getRadius() { return radius; }
+}
+
+package geometry;
+
+import geometry.Vector;
+import util.DistUnit;
+
+/**
+ * Represents a Uniform Cubic B-Spline.
+ * <p>
+ * B-Splines guarantee C2 continuity (smooth position, velocity, and acceleration)
+ * across the entire path. Because they are evaluated using a sliding 4-point window,
+ * calculating a point on the curve runs in O(1) constant time, regardless of how
+ * many control points are in the path.
+ * TODO: Maybe add heading component to each control point
+ * Author: DrPixelCat
+ * @author Sohum Arora
+ */
+public class BSpline implements ParametricSegment {
+    private final int numSegments;
+
+    // Cached polynomial coefficients for each segment
+    // cx[segmentIndex] returns the [c3, c2, c1, c0] array for that segment
+    private final double[][] cx;
+    private final double[][] cy;
+
+    private static final Matrix BLEND_MATRIX = new Matrix(new double[][]{
+            {-1.0 / 6.0, 3.0 / 6.0, -3.0 / 6.0, 1.0 / 6.0},
+            {3.0 / 6.0, -6.0 / 6.0, 3.0 / 6.0, 0.0},
+            {-3.0 / 6.0, 0.0, 3.0 / 6.0, 0.0},
+            {1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0, 0.0}
+    });
+
+    /**
+     * Constructs a continuous B-Spline from an array of waypoints.
+     * Automatically generates "ghost points" at the start and end to guarantee
+     * the curve properly anchors to the first and last input points.
+     *
+     * @param inputPoints An array of Vector waypoints the spline is built around.
+     * @throws IllegalArgumentException if there are 1 or fewer points provided.
+     */
+    public BSpline(Vector[] inputPoints) throws IllegalArgumentException {
+        if (inputPoints.length <= 2) {
+            throw new IllegalArgumentException("You can't make a B-Spline curve with < 2 points!");
+        }
+
+        // 1. Create ghost points
+        Vector[] paddedPoints = new Vector[inputPoints.length + 2];
+        paddedPoints[0] = inputPoints[1].reflect(inputPoints[0]);
+        paddedPoints[paddedPoints.length - 1] = inputPoints[inputPoints.length - 2].reflect(inputPoints[inputPoints.length - 1]);
+        System.arraycopy(inputPoints, 0, paddedPoints, 1, inputPoints.length);
+
+        // 2. Precompute and cache coefficients for all segments
+        this.numSegments = paddedPoints.length - 3;
+        this.cx = new double[numSegments][4];
+        this.cy = new double[numSegments][4];
+
+        for (int i = 0; i < numSegments; i++) {
+            Vector p0 = paddedPoints[i];
+            Vector p1 = paddedPoints[i + 1];
+            Vector p2 = paddedPoints[i + 2];
+            Vector p3 = paddedPoints[i + 3];
+
+            double[] xWindow = {p0.getX().getIn(), p1.getX().getIn(), p2.getX().getIn(), p3.getX().getIn()};
+            double[] yWindow = {p0.getY().getIn(), p1.getY().getIn(), p2.getY().getIn(), p3.getY().getIn()};
+
+            this.cx[i] = BLEND_MATRIX.multiply(xWindow);
+            this.cy[i] = BLEND_MATRIX.multiply(yWindow);
+        }
+    }
+
+    /**
+     * Calculates the physical (x, y) position on the curve at a given percentage.
+     *
+     * @param t The global path parameter [0.0, 1.0].
+     * @return A Vector representing the coordinate location.
+     */
+    @Override
+    public Vector getPosition(double t) {
+        if (t >= 1.0) t = 0.999999;
+        if (t < 0.0) t = 0.0;
+
+        double continuousIndex = t * numSegments;
+        int segment = (int) continuousIndex;
+        double localT = continuousIndex - segment;
+
+        // Grab precomputed coefficients
+        double[] cX = cx[segment];
+        double[] cY = cy[segment];
+
+        // Position: c3*t^3 + c2*t^2 + c1*t + c0
+        double x = ((cX[0] * localT + cX[1]) * localT + cX[2]) * localT + cX[3];
+        double y = ((cY[0] * localT + cY[1]) * localT + cY[2]) * localT + cY[3];
+
+        return Vector.of(x, y, DistUnit.IN);
+    }
+
+    /**
+     * Calculates the first derivative (velocity vector) of the curve at a given percentage.
+     *
+     * @param t The global path parameter [0.0, 1.0].
+     * @return A Vector representing the parametric velocity.
+     */
+    @Override
+    public Vector getFirstDerivative(double t) {
+        if (t >= 1.0) t = 0.999999;
+        if (t < 0.0) t = 0.0;
+
+        double continuousIndex = t * numSegments;
+        int segment = (int) continuousIndex;
+        double localT = continuousIndex - segment;
+
+        double[] cX = cx[segment];
+        double[] cY = cy[segment];
+
+        // Velocity: 3*c3*t^2 + 2*c2*t + c1
+        double dx = (3.0 * cX[0] * localT + 2.0 * cX[1]) * localT + cX[2];
+        double dy = (3.0 * cY[0] * localT + 2.0 * cY[1]) * localT + cY[2];
+
+        // Chain rule scaling
+        return Vector.of(dx, dy, DistUnit.IN).times(numSegments);
+    }
+
+    /**
+     * Calculates the second derivative (acceleration vector) of the curve at a given percentage.
+     *
+     * @param t The global path parameter [0.0, 1.0].
+     * @return A Vector representing the parametric acceleration.
+     */
+    @Override
+    public Vector getSecondDerivative(double t) {
+        if (t >= 1.0) t = 0.999999;
+        if (t < 0.0) t = 0.0;
+
+        double continuousIndex = t * numSegments;
+        int segment = (int) continuousIndex;
+        double localT = continuousIndex - segment;
+
+        double[] cX = cx[segment];
+        double[] cY = cy[segment];
+
+        // Acceleration: 6*c3*t + 2*c2
+        double ddx = 6.0 * cX[0] * localT + 2.0 * cX[1];
+        double ddy = 6.0 * cY[0] * localT + 2.0 * cY[1];
+
+        // Chain rule scaling
+        return Vector.of(ddx, ddy, DistUnit.IN).times((double) numSegments * numSegments);
+    }
+}
+
+
+package geometry;
+
+import android.annotation.SuppressLint;
+import androidx.annotation.NonNull;
+
+import util.DistUnit;
+
+/**
+ * A class representing a distance that can be easily converted between {@link DistUnit}s.
+ *
+ * @author Dylan B. - 18597 RoboClovers - Delta
+ */
+public final class Dist {
+    private final double inches;
+
+    // region Constructors and factory methods
+    // Private constructor to force use of the factory method
+    private Dist(double inches) { this.inches = inches; }
+
+    /** Creates a Distance from a specific unit. */
+    public static Dist of(double value, DistUnit unit) {
+        return new Dist(unit.toInches(value));
+    }
+
+    /** @return the distance value in the requested unit. */
+    public double get(DistUnit unit) { return unit.fromInches(this.inches); }
+
+    /** Creates a Distance from inches. */
+    public static Dist fromIn(double inches) { return of(inches, DistUnit.IN); }
+
+    /** Creates a Distance from feet. */
+    public static Dist fromFt(double feet) { return of(feet, DistUnit.FT); }
+
+    /** Creates a Distance from millimeters. */
+    public static Dist fromMm(double millimeters) { return of(millimeters, DistUnit.MM); }
+
+    /** Creates a Distance from centimeters. */
+    public static Dist fromCm(double centimeters) { return of(centimeters, DistUnit.CM); }
+
+    /** Creates a Distance from meters. */
+    public static Dist fromM(double meters) { return of(meters, DistUnit.M); }
+    // endregion
+
+    // region Getters
+    /** @return the distance in inches. */
+    public double getIn() { return this.inches; }
+
+    /** @return the distance in feet. */
+    public double getFt() { return get(DistUnit.FT); }
+
+    /** @return the distance in millimeters. */
+    public double getMm() { return get(DistUnit.MM); }
+
+    /** @return the distance in centimeters. */
+    public double getCm() { return get(DistUnit.CM); }
+
+    /** @return the distance in meters. */
+    public double getM() { return get(DistUnit.M); }
+    // endregion
+
+    // region Arithmetic operations
+    /** @return a new Distance that is the sum of this Distance and another one. */
+    public Dist plus(Dist other) { return of(this.inches + other.inches, DistUnit.IN); }
+
+    /** @return a new Distance that is the difference of this Distance and another one. */
+    public Dist minus(Dist other) { return of(this.inches - other.inches, DistUnit.IN); }
+
+    /** @return a new Distance that is this Distance multiplied by a scalar. */
+    public Dist times(double scalar) { return of(this.inches * scalar, DistUnit.IN); }
+
+    /** @return a new Distance that is this Distance multiplied by another Distance. */
+    public Dist times(Dist other) { return of(this.inches * other.inches, DistUnit.IN); }
+
+    /** @return a new Distance that is this Distance divided by a scalar. */
+    public Dist div(double scalar) { return of(this.inches / scalar, DistUnit.IN); }
+
+    /** @return a new Distance that is this Distance divided by another Distance. */
+    public Dist div(Dist other) { return of(this.inches / other.inches, DistUnit.IN); }
+
+    /** @return a new Distance that is the absolute value of this Distance. */
+    public Dist abs() { return of(Math.abs(this.inches), DistUnit.IN); }
+
+    /** @return a new Distance that is the hypotenuse of this Distance and another one. */
+    public Dist hypot(Dist other) { return of(Math.hypot(this.inches, other.inches), DistUnit.IN); }
+    // endregion
+
+    // region Other operations and methods
+    /** @return a new Distance that is the mirror of this Distance across the origin. */
+    public Dist mirror() { return new Dist(-this.inches); }
+
+    /** @return a copy of this Distance */
+    public Dist copy() { return new Dist(this.inches); }
+
+    @SuppressLint("DefaultLocale")
+    @Override
+    @NonNull
+    public String toString() { return String.format("%.3f in", this.inches); }
+    // endregion
+}
+
+package geometry;
+
+/**
+ * A generic class for matrix mathematics.
+ * Author: DrPixelCat
+ * @author Sohum Arora 22985 Paraducks
+ */
+public class Matrix {
+    private final double[][] data;
+    private final int rows;
+    private final int cols;
+
+    /**
+     * Constructs a new Matrix from a 2D double array.
+     *
+     * @param data The 2D array representing the matrix [rows][columns]
+     */
+    public Matrix(double[][] data) {
+        this.rows = data.length;
+        this.cols = data[0].length;
+        this.data = new double[rows][cols];
+
+        // Deep copy to ensure the matrix is immutable
+        for (int i = 0; i < rows; i++) {
+            System.arraycopy(data[i], 0, this.data[i], 0, cols);
+        }
+    }
+
+    /**
+     * Multiplies this matrix by a 1D column vector.
+     *
+     * @param vector The 1D array representing the column vector
+     * @return A new 1D array containing the result
+     */
+    public double[] multiply(double[] vector) {
+        if (vector.length != this.cols) {
+            throw new IllegalArgumentException(
+                    "Matrix columns (" + this.cols + ") must match vector length (" + vector.length + ")."
+            );
+        }
+
+        double[] result = new double[this.rows];
+        for (int i = 0; i < this.rows; i++) {
+            double sum = 0.0;
+            for (int j = 0; j < this.cols; j++) {
+                sum += this.data[i][j] * vector[j];
+            }
+            result[i] = sum;
+        }
+        return result;
+    }
+    Matrix multiply(Matrix m) {
+        if (this.cols != m.rows) {
+            throw new IllegalArgumentException(
+                    "Cannot multiply: this matrix is " + this.getRows() + "x" + this.getCols() +
+                            " but other matrix is " + m.getRows() + "x" + m.getCols() +
+                            ". Inner dimensions must match."
+            );
+        }
+
+        double[][] result = new double[this.getRows()][m.getCols()];
+        for (int i = 0; i < this.getRows(); i++) {
+            for (int j = 0; j < m.getCols(); j++) {
+                double sum = 0.0;
+                for (int k = 0; k < this.getCols(); k++) {
+                    sum += this.data[i][k] * m.data[k][j];
+                }
+                result[i][j] = sum;
+            }
+        }
+        return new Matrix(result);
+    }
+
+    /**
+     * Get a value from the matrix.
+     */
+    public double get(int row, int col) {
+        if (row < 0 || row > rows || col < 0 || col > cols) {
+            throw new IllegalArgumentException("Index out of bounds!");
+        }
+        return data[row][col];
+    }
+
+    public int getRows() {
+        return rows;
+    }
+
+    public int getCols() {
+        return cols;
+    }
+}
+
+
+package geometry;
+
+/**
+ * Represents a purely mathematical, stateless 2D parametric curve.
+ * Evaluated strictly using the parameter 't' in the domain [0.0, 1.0].
+ * Author: DrPixelCat
+ */
+public interface ParametricSegment {
+
+    /**
+     * @return The (x, y) coordinate at parameter t
+     */
+    Vector getPosition(double t);
+
+    /**
+     * @return The first derivative (velocity vector) at parameter t
+     */
+    Vector getFirstDerivative(double t);
+
+    /**
+     * @return The second derivative (acceleration vector) at parameter t
+     */
+    Vector getSecondDerivative(double t);
+
+    /**
+     * @return The normalized tangent vector (forward direction) at parameter t.
+     */
+    default Vector getTangentVector(double t) {
+        Vector d1 = getFirstDerivative(t);
+        return d1.normalize(); // handles zero magnitude
+    }
+
+    /**
+     * @return The normalized normal vector (perpendicular to tangent) at parameter t.
+     * Used for calculating centripetal force and curvature vectors.
+     */
+    default Vector getNormalVector(double t) {
+        // Rotating the tangent by 90 degrees (PI/2 radians) yields the normal
+        return getTangentVector(t).rotate(Angle.fromRad(Math.PI / 2));
+    }
+
+    /**
+     * Calculates the signed curvature at parameter t.
+     *
+     * @return Curvature (1 / radius). A straight line will naturally return 0.0.
+     */
+    default double getCurvature(double t) {
+        Vector d1 = getFirstDerivative(t);
+        Vector d2 = getSecondDerivative(t);
+
+        double magSq = d1.getMagSq().getIn();
+        if (magSq <= 1e-9) {
+            return 0.0;
+        }
+
+        // κ = (v × a) / |v|^3
+        double crossProduct = d1.cross(d2).getIn();
+        return crossProduct / Math.pow(magSq, 1.5);
+    }
+}
+
+package geometry;
+
+/**
+ * Represents a precalculated, discrete point along a parametric path segment.
+ * <p>
+ * This class is used to populate a Look-Up Table (LUT), allowing the robot to
+ * quickly map a parametric 't' value to physical coordinates and estimate the
+ * remaining arc-length distance to the end of the curve in O(1) time.
+ * <p>
+ * Author: DrPixelCat
+ */
+public class PathPoint {
+    private final double t;
+    private final double distanceToEnd;
+    private final Vector location;
+
+    /**
+     * Constructs a precalculated path point.
+     *
+     * @param t             The parametric value [0.0, 1.0] representing this point's location on the curve.
+     * @param distanceToEnd The calculated arc length from this point to the end of the segment.
+     * @param location      The physical 2D coordinate of the curve at this 't' value.
+     */
+    public PathPoint(double t, double distanceToEnd, Vector location) {
+        this.t = t;
+        this.distanceToEnd = distanceToEnd;
+        this.location = location;
+    }
+
+    /**
+     * Retrieves the physical 2D coordinate of this point.
+     *
+     * @return The location as a Vector.
+     */
+    public Vector getLocation() {
+        return location;
+    }
+
+    /**
+     * Retrieves the parametric progression of this point along the curve.
+     *
+     * @return The 't' value, typically between [0.0, 1.0].
+     */
+    public double getT() {
+        return t;
+    }
+
+    /**
+     * Retrieves the precalculated arc length from this point to the end of the segment.
+     *
+     * @return The remaining distance in inches.
+     */
+    public double getDistanceToEnd_in() {
+        return distanceToEnd;
+    }
+}
+
+package geometry;
+
+/**
+ * A wrapper class that binds a mathematical parametric curve to physical properties.
+ * <p>
+ * This class handles the generation of a Look-Up Table (LUT) to precalculate
+ * arc-length distances, enabling blisteringly fast O(1) distance lookups and
+ * highly efficient closest-point projection using Newton-Raphson refinement.
+ * Internally, all units are inches and radians.
+ * <p>
+ * Author: DrPixelCat
+ */
+public class PathSegment {
+    private final ParametricSegment segment;
+    private final double length;
+    private final double POINTS_PER_INCH = 0.5;
+    private final PathPoint[] LUTpoints;
+
+    /**
+     * Constructs a PathSegment and automatically generates its Look-Up Table (LUT).
+     *
+     * @param segment The underlying parametric geometry (e.g., Line, BSpline).
+     */
+    public PathSegment(ParametricSegment segment) {
+        this.segment = segment;
+        double length = calculateCoarseLength();
+
+        int calculatedPoints = (int) (length * POINTS_PER_INCH);
+        int numPoints = Math.max(2, calculatedPoints);
+
+        this.LUTpoints = new PathPoint[numPoints];
+
+        double distFromEnd = 0.0;
+        Vector lastPoint = null;
+
+        for (int i = numPoints - 1; i >= 0; i--) {
+            double t = (double) i / (numPoints - 1);
+            Vector location = segment.getPosition(t);
+
+            if (lastPoint != null) {
+                distFromEnd += lastPoint.minus(location).getMag().getIn();
+            }
+            lastPoint = location;
+            LUTpoints[i] = new PathPoint(t, distFromEnd, location);
+        }
+
+        this.length = distFromEnd;
+    }
+
+    /**
+     * Finds the closest parametric 't' value on the curve to the robot's physical location.
+     * Uses a highly efficient two-step process: an O(N) coarse search through the LUT,
+     * followed by a continuous Newton-Raphson root-finding refinement.
+     *
+     * @param location The current physical coordinate of the robot.
+     * @return The parametric value 't' [0.0, 1.0] of the closest point on the curve.
+     */
+    public double getBestT(Vector location) {
+        double bestT = 0;
+
+        // IMPROVEMENT NOTE: 'coarseSelection' is assigned here and inside the loop,
+        // but it is never actually used in the Newton-Raphson refinement below!
+        // You can safely delete this variable to save a tiny bit of overhead.
+        PathPoint coarseSelection = LUTpoints[0];
+        double minDistSq = Double.MAX_VALUE;
+
+        // Coarse search via LUT
+        for (PathPoint point : LUTpoints) {
+            double distSq = point.getLocation().minus(location).getMagSq().getIn();
+
+            if (distSq < minDistSq) {
+                minDistSq = distSq;
+                bestT = point.getT();
+                coarseSelection = point;
+            }
+        }
+
+        // Newton-Raphson refinement
+        for (int i = 0; i < 5; i++) {
+            Vector b = segment.getPosition(bestT);
+            Vector d1 = segment.getFirstDerivative(bestT);
+
+            Vector diff = b.minus(location);
+            double numerator = diff.dot(d1).getIn();
+
+            // Optional Fast-Exit: If the distance vector is perfectly orthogonal to the tangent,
+            // we have already found the exact closest point.
+            if (Math.abs(numerator) < 1e-6 && bestT > 0.0 && bestT < 1.0) {
+                break;
+            }
+
+            Vector d2 = segment.getSecondDerivative(bestT);
+            double denominator = d1.dot(d1).plus(diff.dot(d2)).getIn();
+
+            // Abort on singularity to prevent backward pushing
+            if (denominator <= 0.0) {
+                break;
+            }
+
+            double previousT = bestT;
+            bestT = bestT - (numerator / denominator);
+            bestT = Math.max(0.0, Math.min(1.0, bestT));
+
+            if (Math.abs(bestT - previousT) < 1e-6) {
+                break;
+            }
+        }
+
+        // Update state at refined t
+        return bestT;
+    }
+
+    /**
+     * Retrieves the physical coordinate of the curve at a given 't'.
+     *
+     * @param t The parametric progression [0.0, 1.0].
+     * @return The 2D position Vector.
+     */
+    public Vector getPosition(double t) {
+        return segment.getPosition(t);
+    }
+
+    /**
+     * Retrieves the first derivative (velocity) of the curve at a given 't'.
+     *
+     * @param t The parametric progression [0.0, 1.0].
+     * @return The velocity Vector.
+     */
+    public Vector getFirstDerivative(double t) {
+        return segment.getFirstDerivative(t);
+    }
+
+    /**
+     * Retrieves the second derivative (acceleration) of the curve at a given 't'.
+     *
+     * @param t The parametric progression [0.0, 1.0].
+     * @return The acceleration Vector.
+     */
+    public Vector getSecondDerivative(double t) {
+        return segment.getSecondDerivative(t);
+    }
+
+    /**
+     * Calculates the remaining physical distance to the end of the segment
+     * using a blisteringly fast O(1) LUT index calculation.
+     *
+     * @param closestPointOnCurve The calculated physical position on the curve closest to the robot.
+     * @param t                   The parametric 't' value that yielded closestPointOnCurve.
+     * @return The remaining distance in inches.
+     */
+    public double getDistanceToEnd_in(Vector closestPointOnCurve, double t) {
+        if (t >= 1.0) return 0.0;
+
+        if (t <= 0.0) {
+            double mag = closestPointOnCurve.minus(LUTpoints[0].getLocation()).getMag().getIn();
+            return mag + LUTpoints[0].getDistanceToEnd_in();
+        }
+
+        int lastIndex = LUTpoints.length - 1;
+
+        int nextIndex = (int) Math.ceil(t * lastIndex);
+
+        nextIndex = Math.max(0, Math.min(nextIndex, lastIndex));
+
+        PathPoint nextPoint = LUTpoints[nextIndex];
+
+        double mag = closestPointOnCurve.minus(nextPoint.getLocation()).getMag().getIn();
+        return mag + nextPoint.getDistanceToEnd_in();
+    }
+
+    // VERY approximate length calculation for Coarse Polyline Approximation
+
+    /**
+     * A highly optimized approximation of the segment's length used exclusively
+     * to determine how many LUT points to allocate.
+     *
+     * @return An estimated arc-length in inches.
+     */
+    private double calculateCoarseLength() {
+        final int SAMPLES = 8;
+        double roughLength = 0.0;
+        Vector prev = segment.getPosition(0.0);
+        for (int i = 1; i <= SAMPLES; i++) {
+            Vector curr = segment.getPosition((double) i / SAMPLES);
+            roughLength += curr.minus(prev).getMag().getIn();
+            prev = curr;
+        }
+        return roughLength;
+    }
+
+    /**
+     * @return The high-accuracy calculated length of the segment in inches.
+     */
+    public double getLength_in() { return length; }
+
+    /**
+     * Calculates the instantaneous radius of curvature of a parametric curve at a specific point.
+     * <p>
+     * The radius of curvature is geometrically defined as the radius of the circular arc
+     * which best approximates the curve at that point. It is computed using the magnitude
+     * of the first derivative cubed, divided by the magnitude of the 2D cross product
+     * of the first and second derivatives.
+     *
+     * @param firstDerivative  The first derivative vector (velocity/tangent) of the curve.
+     * @param secondDerivative The second derivative vector (acceleration) of the curve.
+     * @return The instantaneous radius of curvature. Returns Double.POSITIVE_INFINITY if the curve is perfectly straight.
+     */
+    public static double calculateRadiusOfCurvature(Vector firstDerivative, Vector secondDerivative) {
+        // Use the Vector class's built-in 2D cross product utility
+        double crossProductMag = firstDerivative.cross(secondDerivative).abs().getIn();
+
+        // Safety Check: If the cross product is near zero, the derivatives are parallel,
+        // meaning the path is a perfectly straight line with an infinite radius.
+        if (crossProductMag < 1e-6) {
+            return Double.POSITIVE_INFINITY;
+        }
+
+        // Use the Vector class's built-in magnitude utility to calculate ||r'||^3
+        double velocityMag = firstDerivative.getMag().getIn();
+        double numerator = Math.pow(velocityMag, 3);
+
+        return numerator / crossProductMag;
+    }
+}
+
+package geometry;
+
+import android.annotation.SuppressLint;
+
+import androidx.annotation.NonNull;
+
+import util.AngleUnit;
+import util.DistUnit;
+
+/**
+ * A class representing a 2D position, which consists of a position Vector and a heading Angle.
+ * You should consider using a {@link util.PoseFactory} to create Pose objects instead of using
+ * the constructors in this class directly.
+ *
+ * @author Dylan B. - 18597 RoboClovers - Delta
+ */
+public class Pose {
+    private final Vector position;
+    private final Angle heading;
+
+    // region Common poses
+    /** Common poses on an FTC field defined in the Apex coordinate system. */
+    public enum Common { // Common poses are defined in inches
+        CENTER(0, 0),
+        TOP_LEFT(-70.5, 70.5),
+        TOP_RIGHT(70.5, 70.5),
+        BOTTOM_LEFT(-70.5, -70.5),
+        BOTTOM_RIGHT(70.5, -70.5);
+
+        private final Vector position;
+
+        Common(double x, double y) { this.position = Vector.of(x, y, DistUnit.IN); }
+
+        /** @return this position as a Vector. */
+        public Vector getPosition() { return position; }
+
+        /** @return a Pose with this position and a heading of 0. */
+        public Pose get() { return new Pose(position, Angle.fromRad(0)); }
+
+        /** @return a Pose with this position and the specified Angle. */
+        public Pose withHeading(Angle heading) { return new Pose(position, heading); }
+
+        /** @return a Pose with this position and the specified heading in the given unit. */
+        public Pose withHeading(double heading, AngleUnit angleUnit) {
+            return withHeading(Angle.of(heading, angleUnit));
+        }
+    }
+    // endregion
+
+    // region Constructors and factory methods
+    /** Creates a Pose from a position Vector and a heading Angle. */
+    public Pose(Vector position, Angle heading) { this.position = position; this.heading = heading; }
+
+    /** Creates a Pose with X, y, and heading equal to zero */
+    public static Pose zero() { return new Pose(Vector.zero(), Angle.fromRad(0)); }
+    // endregion
+
+    // region Getters
+    /** @return the position of this Pose as a Vector */
+    public Vector getPos() { return position; }
+
+    /** @return the x component of the position as a {@link Dist} */
+    public Dist getX() { return position.getX(); }
+
+    /** @return the x component of the position in the specified distance unit */
+    public double getX(DistUnit unit) { return position.getX(unit); }
+
+    /** @return the y component of the position as a {@link Dist} */
+    public Dist getY() { return position.getY(); }
+
+    /** @return the y component of the position in the specified distance unit */
+    public double getY(DistUnit unit) { return position.getY(unit); }
+
+    /** @return the heading of this Pose as an {@link Angle} */
+    public Angle getHeading() { return heading; }
+
+    /** @return the heading of this Pose in the specified angle unit */
+    public double getHeading(AngleUnit unit) { return heading.get(unit); }
+    // endregion
+
+    // region Arithmetic operations
+    /** @return a new Pose that is the sum of this Pose and another Pose. */
+    public Pose plus(Pose other) {
+        return new Pose(this.position.plus(other.position), this.heading.plus(other.heading));
+    }
+
+    /** @return a new Pose that is the difference between this Pose and another Pose. */
+    public Pose minus(Pose other) {
+        return new Pose(this.position.minus(other.position), this.heading.minus(other.heading));
+    }
+    // endregion
+
+    // region Other operations and methods
+    /** @return the straight line distance from this vector to another vector */
+    public Dist distanceTo(Pose other) { return this.position.distanceTo(other.position); }
+
+    /** @return a new Pose that is the mirror of this Pose across the X-axis. */
+    public Pose mirrorX() { return new Pose(this.position.mirrorX(), this.heading.mirrorX()); }
+
+    /** @return a new Pose that is the mirror of this Pose across the Y-axis. */
+    public Pose mirrorY() { return new Pose(this.position.mirrorY(), this.heading.mirrorY()); }
+
+    /** @return a copy of this Pose. */
+    public Pose copy() { return new Pose(this.position, this.heading); }
+
+    @SuppressLint("DefaultLocale")
+    @NonNull
+    @Override
+    public String toString() { // ex. (12.000 in, 5.000 in, 3.141 rad)
+        return String.format("(%s, %s)", position.toString(), heading.toString());
+    }
+    // endregion
+}
+
+package geometry;
+
+import android.annotation.SuppressLint;
+
+import androidx.annotation.NonNull;
+
+import util.DistUnit;
+
+/**
+ * A class representing a 2D vector or point using {@link Dist} objects.
+ *
+ * @author Dylan B. - 18597 RoboClovers - Delta
+ */
+public final class Vector {
+    private final Dist x;
+    private final Dist y;
+
+    // region Constructors and factory methods
+    /** Creates a Vector from two Dist objects. */
+    public Vector(Dist x, Dist y) { this.x = x; this.y = y; }
+
+    /** Create a Vector with the given (x, y) in the specified unit */
+    public static Vector of(double x, double y, DistUnit unit) {
+        return new Vector(Dist.of(x, unit), Dist.of(y, unit));
+    }
+
+    /** Create a Vector with the given (r, theta) **in polar coordinates** in the specified unit */
+    public static Vector fromPolar(Dist r, Angle theta) {
+        double radians = theta.getRad();
+        return new Vector(
+                Dist.fromIn(r.getIn() * Math.cos(radians)),
+                Dist.fromIn(r.getIn() * Math.sin(radians))
+        );
+    }
+
+    /** Create a Vector with X and Y equal to zero */
+    public static Vector zero() { return new Vector(Dist.fromIn(0), Dist.fromIn(0)); }
+    // endregion
+
+    // region Getters
+    /** @return the x {@link Dist} component of the vector */
+    public Dist getX() { return x; }
+
+    /** @return the y {@link Dist} component of the vector */
+    public Dist getY() { return y; }
+
+    /** @return the x component of the vector in the specified distance unit */
+    public double getX(DistUnit unit) { return x.get(unit); }
+
+    /** @return the y component of the vector in the specified distance unit */
+    public double getY(DistUnit unit) { return y.get(unit); }
+
+    /** @return the magnitude of this Vector from the origin */
+    public Dist getMag() { return x.hypot(y); }
+
+    /** @return the magnitude squared of this Vector from the origin */
+    public Dist getMagSq() { return Dist.fromIn(x.getIn() * x.getIn() + y.getIn() * y.getIn()); }
+
+    /** Calculates the theta of this vector relative to the positive X-axis. */
+    public Angle getTheta() { return Angle.fromRad(Math.atan2(y.getIn(), x.getIn())); }
+    // endregion
+
+    // region Arithmetic operations
+    /** @return a Vector that is the sum of this Vector and another Vector */
+    public Vector plus(Vector other) {
+        return new Vector(this.x.plus(other.x), this.y.plus(other.y));
+    }
+
+    /** @return a Vector that is the difference between this Vector and another Vector */
+    public Vector minus(Vector other) {
+        return new Vector(this.x.minus(other.x), this.y.minus(other.y));
+    }
+
+    /** @return a Vector that is this Vector multiplied by a scalar */
+    public Vector times(double scalar) {
+        return new Vector(this.x.times(scalar), this.y.times(scalar));
+    }
+
+    /** @return a Vector that is this Vector divided by a scalar */
+    public Vector div(double scalar) { return new Vector(this.x.div(scalar), this.y.div(scalar)); }
+
+    /** @return a Vector that is the absolute value of this Vector */
+    public Vector abs() { return new Vector(this.x.abs(), this.y.abs()); }
+
+    /** @return the scalar dot product of this Vector and another Vector */
+    public Dist dot(Vector other) { return this.x.times(other.x).plus(this.y.times(other.y)); }
+
+    /** @return the scalar cross product of this Vector and another Vector */
+    public Dist cross(Vector other) { return this.x.times(other.y).minus(this.y.times(other.x)); }
+    // endregion
+
+    // region Other operations and methods
+    /** @return the straight line distance from this vector to another vector */
+    public Dist distanceTo(Vector other) { return this.minus(other).getMag(); }
+
+    /** @return a Vector that is this Vector rotated counterclockwise about the origin by theta */
+    public Vector rotate(Angle theta) {
+        double radians = theta.getRad();
+        double cos = Math.cos(radians);
+        double sin = Math.sin(radians);
+        double xInches = this.x.getIn();
+        double yInches = this.y.getIn();
+
+        return new Vector(
+                Dist.fromIn(xInches * cos - yInches * sin),
+                Dist.fromIn(xInches * sin + yInches * cos)
+        );
+    }
+
+    /** @return a Vector that is this Vector normalized (scaled to have a magnitude of 1) */
+    public Vector normalize() {
+        double magIn = this.getMag().getIn();
+        if (magIn < 1e-9) {
+            return Vector.zero();
+        }
+        return this.div(magIn);
+    }
+
+    /** @return a Vector that is the mirror of this Vector across the X-axis */
+    public Vector mirrorX() { return new Vector(this.x, this.y.mirror()); }
+
+    /** @return a Vector that is the mirror of this Vector across the Y-axis */
+    public Vector mirrorY() { return new Vector(this.x.mirror(), this.y); }
+
+    /** @return a Vector that is the reflection of this Vector across another Vector */
+    public Vector reflect(Vector across) {
+        return across.plus(this.minus(across).times(-1.0));
+    }
+
+    /** @return a copy of this Vector */
+    public Vector copy() { return new Vector(this.x.copy(), this.y.copy()); }
+
+    @SuppressLint("DefaultLocale")
+    @NonNull
+    @Override
+    public String toString() { return String.format("%s, %s", x.toString(), y.toString()); }
+    // endregion
+}

@@ -233,6 +233,53 @@ export function sanitizePosePatch(
   };
 }
 
+export function sanitizePath(path: EditorPath): EditorPath {
+  const clampedPoses = path.poses.map((pose) => ({
+    ...pose,
+    x: clampField(pose.x),
+    y: clampField(pose.y),
+  }));
+
+  const poses = clampedPoses.map((pose, index) => {
+    if (pose.kind !== "arc" || isEndpoint(index, clampedPoses.length)) {
+      return isEndpoint(index, clampedPoses.length) ? { ...pose, kind: "pose" as const } : pose;
+    }
+
+    const prevPose = clampedPoses[index - 1];
+    const nextPose = clampedPoses[index + 1];
+    const maxRadius = Math.min(
+      Math.hypot(pose.x - prevPose.x, pose.y - prevPose.y),
+      Math.hypot(pose.x - nextPose.x, pose.y - nextPose.y),
+    );
+
+    if (maxRadius < MIN_ARC_RADIUS_IN) {
+      return { ...pose, kind: "pose" as const, radius: MIN_ARC_RADIUS_IN };
+    }
+
+    return {
+      ...pose,
+      radius: Math.min(Math.max(MIN_ARC_RADIUS_IN, pose.radius), maxRadius),
+    };
+  });
+
+  for (let index = 1; index < poses.length; index++) {
+    const prevPose = poses[index - 1];
+    const pose = poses[index];
+    if (prevPose.kind !== "arc" || pose.kind !== "arc") continue;
+
+    const available = Math.hypot(pose.x - prevPose.x, pose.y - prevPose.y) - MIN_ARC_CLEARANCE_IN;
+    if (available >= prevPose.radius + pose.radius) continue;
+
+    const nextRadius = available - prevPose.radius;
+    poses[index] =
+      nextRadius >= MIN_ARC_RADIUS_IN
+        ? { ...pose, radius: nextRadius }
+        : { ...pose, kind: "pose", radius: MIN_ARC_RADIUS_IN };
+  }
+
+  return { ...path, poses };
+}
+
 export function endpointIsSnapped(state: EditorState, pathId: string, poseId: string): boolean {
   const path = state.paths.find((item) => item.id === pathId);
   if (!path) return false;

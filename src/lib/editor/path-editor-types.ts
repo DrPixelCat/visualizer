@@ -19,13 +19,24 @@ export type EditorPose = Translation2d & {
 };
 
 export type PathAction =
-  | { id: string; type: "callback"; distanceIn: number; label: string }
-  | { id: string; type: "turn"; headingDeg: number }
-  | { id: string; type: "hold"; durationSeconds: number };
+  | { id: string; type: "distanceCallback"; distanceIn: number; label: string }
+  | { id: string; type: "angularCallback"; angleDeg: number; label: string };
+
+export type EditorTurn = {
+  id: string;
+  name: string;
+  sourcePathId?: string;
+  x: number;
+  y: number;
+  startHeadingDeg: number;
+  targetHeadingDeg: number;
+  collapsed: boolean;
+};
 
 export type EditorSelection =
   | { type: "pose"; pathId: string; poseId: string }
   | { type: "path"; pathId: string }
+  | { type: "turn"; turnId: string }
   | { type: "action"; pathId: string; actionId: string }
   | null;
 
@@ -42,9 +53,11 @@ export type EditorPath = {
 
 export type EditorState = {
   paths: EditorPath[];
+  turns: EditorTurn[];
   activePathId: string;
   selection: EditorSelection;
   showPoseLabels: boolean;
+  favoritePoseIds: string[];
 };
 
 export type HistoryState = {

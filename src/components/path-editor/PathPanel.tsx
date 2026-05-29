@@ -4,44 +4,69 @@ import { useMemo, useState } from "react";
 import { InterpolationStyle } from "@/lib/geometry";
 import { buildAllApiPreview, formatStyle } from "@/lib/editor/path-editor-api";
 import { INTERPOLATION_OPTIONS } from "@/lib/editor/path-editor-constants";
-import type { BuiltPath, EditorPath, PathAction } from "@/lib/editor/path-editor-types";
+import type {
+  BuiltPath,
+  EditorPath,
+  EditorPose,
+  EditorTurn,
+  PathAction,
+} from "@/lib/editor/path-editor-types";
 import { ActionButton, IconButton, NumberInput } from "@/components/path-editor/EditorControls";
 
 // Right sidebar for path-level configuration and export preview.
 export function PathPanel({
   paths,
+  turns,
   builtPaths,
+  favoritePoses,
   activePathId,
+  selectedPathId,
+  selectedTurnId,
   canUndo,
   canRedo,
   onUndo,
   onRedo,
   onAddPath,
+  onAddTurn,
   onDeletePath,
+  onDeleteTurn,
   onMovePath,
   onActivatePath,
+  onActivateTurn,
   onPatchPath,
+  onPatchTurn,
   onAddAction,
   onPatchAction,
   onRemoveAction,
 }: {
   paths: EditorPath[];
+  turns: EditorTurn[];
   builtPaths: BuiltPath[];
+  favoritePoses: EditorPose[];
   activePathId: string;
+  selectedPathId: string;
+  selectedTurnId: string;
   canUndo: boolean;
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
   onAddPath: () => void;
+  onAddTurn: () => void;
   onDeletePath: (pathId: string) => void;
+  onDeleteTurn: (turnId: string) => void;
   onMovePath: (pathId: string, direction: -1 | 1) => void;
   onActivatePath: (pathId: string) => void;
+  onActivateTurn: (turnId: string) => void;
   onPatchPath: (pathId: string, patch: Partial<EditorPath>) => void;
+  onPatchTurn: (turnId: string, patch: Partial<EditorTurn>) => void;
   onAddAction: (pathId: string, type: PathAction["type"]) => void;
   onPatchAction: (pathId: string, actionId: string, patch: Partial<PathAction>) => void;
   onRemoveAction: (pathId: string, actionId: string) => void;
 }) {
-  const apiPreview = useMemo(() => buildAllApiPreview(paths, builtPaths), [paths, builtPaths]);
+  const apiPreview = useMemo(
+    () => buildAllApiPreview(paths, turns, builtPaths, favoritePoses),
+    [paths, turns, builtPaths, favoritePoses],
+  );
   const [copied, setCopied] = useState(false);
 
   async function copyApiPreview() {
@@ -54,8 +79,8 @@ export function PathPanel({
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center justify-between border-b border-[var(--editor-border)] p-4">
         <div>
-          <h2 className="text-sm font-semibold text-slate-100">Paths</h2>
-          <p className="text-xs text-slate-500">Undo, build, and export path chains</p>
+          <h2 className="text-sm font-semibold text-slate-100">Movement</h2>
+          <p className="text-xs text-slate-500">Create and edit paths and turns</p>
         </div>
         <div className="flex items-center gap-2">
           <IconButton label="Undo (Ctrl+Z)" disabled={!canUndo} onClick={onUndo}>
@@ -73,6 +98,13 @@ export function PathPanel({
           >
             Add path
           </button>
+          <button
+            type="button"
+            className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-button-background)] px-3 py-1.5 text-xs text-slate-200"
+            onClick={onAddTurn}
+          >
+            Add turn
+          </button>
         </div>
       </div>
 
@@ -86,7 +118,8 @@ export function PathPanel({
                   key={path.id}
                   path={path}
                   built={built}
-                  active={path.id === activePathId}
+                  selected={path.id === selectedPathId}
+                  related={path.id === activePathId}
                   canDelete={paths.length > 1}
                   canMoveUp={index > 0}
                   canMoveDown={index < paths.length - 1}
@@ -101,6 +134,19 @@ export function PathPanel({
                 />
               );
             })}
+            {turns.map((turn) => (
+              <TurnCard
+                key={turn.id}
+                turn={turn}
+                sourcePath={paths.find((path) => path.id === turn.sourcePathId)}
+                selected={turn.id === selectedTurnId}
+                related={Boolean(turn.sourcePathId && turn.sourcePathId === activePathId)}
+                onActivate={() => onActivateTurn(turn.id)}
+                onPatch={(patch) => onPatchTurn(turn.id, patch)}
+                onPatchPath={onPatchPath}
+                onDelete={() => onDeleteTurn(turn.id)}
+              />
+            ))}
           </div>
         </div>
 
@@ -124,7 +170,8 @@ export function PathPanel({
 function PathCard({
   path,
   built,
-  active,
+  selected,
+  related,
   canDelete,
   canMoveUp,
   canMoveDown,
@@ -139,7 +186,8 @@ function PathCard({
 }: {
   path: EditorPath;
   built?: BuiltPath;
-  active: boolean;
+  selected: boolean;
+  related: boolean;
   canDelete: boolean;
   canMoveUp: boolean;
   canMoveDown: boolean;
@@ -155,12 +203,22 @@ function PathCard({
   return (
     <section
       className="rounded border bg-[var(--editor-panel-inset)]"
-      style={{ borderColor: active ? "var(--editor-selected)" : "var(--editor-border)" }}
+      style={{
+        borderColor: selected
+          ? "var(--editor-selected)"
+          : related
+            ? "var(--editor-canvas-path)"
+            : "var(--editor-border)",
+      }}
     >
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         className="flex w-full items-center justify-between gap-2 p-3 text-left"
         onClick={onActivate}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") onActivate();
+        }}
       >
         <input
           className="min-w-0 flex-1 rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm font-semibold text-slate-100 outline-none"
@@ -195,7 +253,7 @@ function PathCard({
         >
           Delete
         </button>
-      </button>
+      </div>
 
       {!path.collapsed ? (
         <div className="flex flex-col gap-4 border-t border-[var(--editor-border)] p-3">
@@ -266,9 +324,8 @@ function ActionList({
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-semibold uppercase text-slate-500">Actions</h3>
         <div className="flex gap-1">
-          <ActionButton label="Callback" onClick={() => onAddAction("callback")} />
-          <ActionButton label="Turn" onClick={() => onAddAction("turn")} />
-          <ActionButton label="Hold" onClick={() => onAddAction("hold")} />
+          <ActionButton label="Distance" onClick={() => onAddAction("distanceCallback")} />
+          <ActionButton label="Angular" onClick={() => onAddAction("angularCallback")} />
         </div>
       </div>
       {path.actions.map((action) => (
@@ -298,18 +355,20 @@ function ActionEditor({
   return (
     <div className="rounded border border-[var(--editor-border)] bg-[var(--editor-panel)] p-3">
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase text-slate-500">{action.type}</span>
+        <span className="text-xs font-semibold uppercase text-slate-500">
+          {action.type === "distanceCallback" ? "distance callback" : "angular callback"}
+        </span>
         <button type="button" className="text-xs text-slate-400" onClick={onRemove}>
           Remove
         </button>
       </div>
-      {action.type === "callback" ? (
-        <div className="grid grid-cols-[1fr_82px] gap-2">
-          <input
-            className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm text-slate-100 outline-none"
-            value={action.label}
-            onChange={(event) => onChange({ label: event.target.value })}
-          />
+      <div className="grid grid-cols-[1fr_82px] gap-2">
+        <input
+          className="rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm text-slate-100 outline-none"
+          value={action.label}
+          onChange={(event) => onChange({ label: event.target.value })}
+        />
+        {action.type === "distanceCallback" ? (
           <NumberInput
             label="Distance"
             value={action.distanceIn}
@@ -320,20 +379,112 @@ function ActionEditor({
               onChange({ distanceIn: Math.max(0, Math.min(lengthIn, distanceIn)) })
             }
           />
-        </div>
-      ) : action.type === "turn" ? (
-        <NumberInput
-          label="Target heading"
-          value={action.headingDeg}
-          onChange={(headingDeg) => onChange({ headingDeg })}
-        />
-      ) : (
-        <NumberInput
-          label="Duration"
-          value={action.durationSeconds}
-          onChange={(durationSeconds) => onChange({ durationSeconds })}
-        />
-      )}
+        ) : (
+          <NumberInput
+            label="Angle"
+            value={action.angleDeg}
+            onChange={(angleDeg) => onChange({ angleDeg })}
+          />
+        )}
+      </div>
     </div>
+  );
+}
+
+function TurnCard({
+  turn,
+  sourcePath,
+  selected,
+  related,
+  onActivate,
+  onPatch,
+  onPatchPath,
+  onDelete,
+}: {
+  turn: EditorTurn;
+  sourcePath?: EditorPath;
+  selected: boolean;
+  related: boolean;
+  onActivate: () => void;
+  onPatch: (patch: Partial<EditorTurn>) => void;
+  onPatchPath: (pathId: string, patch: Partial<EditorPath>) => void;
+  onDelete: () => void;
+}) {
+  const sourceEndPose = sourcePath?.poses[sourcePath.poses.length - 1];
+  const startHeading = sourceEndPose?.headingDeg ?? turn.startHeadingDeg;
+  return (
+    <section
+      className="rounded border bg-[var(--editor-panel-inset)]"
+      style={{
+        borderColor: selected
+          ? "var(--editor-selected)"
+          : related
+            ? "var(--editor-canvas-path)"
+            : "var(--editor-border)",
+      }}
+    >
+      <div
+        role="button"
+        tabIndex={0}
+        className="flex w-full items-center justify-between gap-2 p-3 text-left"
+        onClick={onActivate}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") onActivate();
+        }}
+      >
+        <input
+          className="min-w-0 flex-1 rounded border border-[var(--editor-border-strong)] bg-[var(--editor-input-background)] px-2 py-1.5 text-sm font-semibold text-slate-100 outline-none"
+          value={turn.name}
+          onChange={(event) => onPatch({ name: event.target.value })}
+          onClick={(event) => event.stopPropagation()}
+        />
+        <button
+          type="button"
+          className="text-xs text-slate-400"
+          onClick={(event) => {
+            event.stopPropagation();
+            onPatch({ collapsed: !turn.collapsed });
+          }}
+        >
+          {turn.collapsed ? "Expand" : "Collapse"}
+        </button>
+        <button
+          type="button"
+          className="text-xs text-red-300"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete();
+          }}
+        >
+          Delete
+        </button>
+      </div>
+      {!turn.collapsed ? (
+        <div className="flex flex-col gap-3 border-t border-[var(--editor-border)] p-3">
+          <p className="text-xs text-slate-500">
+            Start ({turn.x.toFixed(1)}, {turn.y.toFixed(1)}) at {startHeading.toFixed(1)} deg
+          </p>
+          {sourcePath && sourceEndPose ? (
+            <NumberInput
+              label="Start heading"
+              value={startHeading}
+              onChange={(headingDeg) => {
+                onPatch({ startHeadingDeg: headingDeg });
+                onPatchPath(sourcePath.id, {
+                  poses: sourcePath.poses.map((pose) =>
+                    pose.id === sourceEndPose.id ? { ...pose, headingDeg } : pose,
+                  ),
+                });
+              }}
+            />
+          ) : null}
+          <NumberInput
+            label="Target heading"
+            value={turn.targetHeadingDeg}
+            onChange={(targetHeadingDeg) => onPatch({ targetHeadingDeg })}
+          />
+        </div>
+      ) : null}
+    </section>
   );
 }

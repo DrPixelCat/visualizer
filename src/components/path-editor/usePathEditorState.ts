@@ -2,16 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KonvaEventObject } from "konva/lib/Node";
-import { InterpolationStyle, type Translation2d } from "@/lib/geometry";
+import type { Translation2d } from "@/lib/geometry";
+import { FIELD_SIZE_IN, MIN_ARC_RADIUS_IN } from "@/lib/editor/path-editor-constants";
 import {
-  FIELD_EDGE_MARGIN_IN,
-  FIELD_SIZE_IN,
-  MIN_ARC_RADIUS_IN,
-} from "@/lib/editor/path-editor-constants";
-import {
-  buildPath,
   clampCanvasPoint,
-  clampField,
   constrainPointNearArcs,
   distanceToPathIn,
   endpointIsSnapped,
@@ -19,72 +13,32 @@ import {
   isEndpoint,
   makePose,
   renumberPoses,
+  sanitizePath,
   sanitizePosePatch,
   snap,
 } from "@/lib/editor/path-editor-geometry";
+import { buildCachedPaths, type BuiltPathCache } from "@/lib/editor/path-editor-cache";
+import { INITIAL_STATE } from "@/lib/editor/path-editor-initial-state";
+import {
+  clampPathDelta,
+  isTypingTarget,
+  makePathAfterPose,
+  makePathAfterTurn,
+  makeTurnAfterPose,
+  normalizeHeadingDeg,
+  patchTurnPoint,
+  snapEndpointIfCloseInState,
+  snapTurnIfCloseInState,
+} from "@/lib/editor/path-editor-state-utils";
 import type {
   EditorPath,
   EditorPose,
   EditorState,
   EditorSelection,
-  BuiltPath,
+  EditorTurn,
   HistoryState,
   PathAction,
 } from "@/lib/editor/path-editor-types";
-
-// Demo seed mirrors the eventual fluent path shape while keeping startup useful.
-const INITIAL_PATHS: EditorPath[] = [
-  {
-    id: "path-0",
-    name: "path1",
-    collapsed: false,
-    interpolation: InterpolationStyle.SMOOTH_START_TO_END,
-    tangentOffsetDeg: 90,
-    customFunctionSource: "s -> Angle.fromDeg(180 + (s * 360.0))",
-    poses: [
-      makePose("pose1", -54, -36, 0),
-      makePose("pose2", -20, 36, null),
-      { ...makePose("pose3", 16, 22, null), kind: "arc", radius: 18 },
-      makePose("pose4", 54, -38, 45),
-    ],
-    actions: [{ id: "action-0", type: "callback", distanceIn: 60, label: "callback" }],
-  },
-];
-
-const INITIAL_STATE: EditorState = {
-  paths: INITIAL_PATHS,
-  activePathId: INITIAL_PATHS[0].id,
-  selection: { type: "pose", pathId: INITIAL_PATHS[0].id, poseId: INITIAL_PATHS[0].poses[0].id },
-  showPoseLabels: true,
-};
-
-function buildCachedPaths(
-  paths: EditorPath[],
-  cache: Map<string, { signature: string; built: BuiltPath }>,
-): BuiltPath[] {
-  const livePathIds = new Set(paths.map((path) => path.id));
-  for (const pathId of cache.keys()) {
-    if (!livePathIds.has(pathId)) cache.delete(pathId);
-  }
-
-  return paths.map((path) => {
-    const signature = geometrySignature(path);
-    const cached = cache.get(path.id);
-    if (cached?.signature === signature) {
-      return { ...cached.built, path };
-    }
-
-    const built = buildPath(path);
-    cache.set(path.id, { signature, built });
-    return built;
-  });
-}
-
-function geometrySignature(path: EditorPath): string {
-  return path.poses
-    .map((pose) => `${pose.id}:${pose.x}:${pose.y}:${pose.headingDeg ?? ""}:${pose.kind}:${pose.radius}`)
-    .join("|");
-}
 
 export function usePathEditorState() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -100,7 +54,7 @@ export function usePathEditorState() {
     poses: EditorPose[];
     startPoint: Translation2d;
   } | null>(null);
-  const builtPathCacheRef = useRef(new Map<string, { signature: string; built: BuiltPath }>());
+  const builtPathCacheRef = useRef<BuiltPathCache>(new Map());
   const [canvasSize, setCanvasSize] = useState(0);
   const [history, setHistory] = useState<HistoryState>({
     past: [],
@@ -132,6 +86,14 @@ export function usePathEditorState() {
   const scale = canvasSize / FIELD_SIZE_IN;
   const selectedPoseId = state.selection?.type === "pose" ? state.selection.poseId : "";
   const selectedActionId = state.selection?.type === "action" ? state.selection.actionId : "";
+  const selectedTurnId = state.selection?.type === "turn" ? state.selection.turnId : "";
+  const favoritePoses = useMemo(
+    () =>
+      state.favoritePoseIds
+        .map((id) => state.paths.flatMap((path) => path.poses).find((pose) => pose.id === id))
+        .filter((pose): pose is EditorPose => Boolean(pose)),
+    [state.favoritePoseIds, state.paths],
+  );
 
   // Commit stores undo checkpoints; live updates avoid filling history during drags.
   function commit(mutator: (current: EditorState) => EditorState) {
@@ -211,7 +173,6 @@ export function usePathEditorState() {
     const apply = Object.keys(patch).every((key) => key === "name") ? updateLive : commit;
     patchPoseWith(apply, pathId, poseId, patch);
   }
-
   function patchPoseLive(pathId: string, poseId: string, patch: Partial<EditorPose>) {
     patchPoseWith(updateLive, pathId, poseId, patch);
   }
@@ -226,12 +187,12 @@ export function usePathEditorState() {
       ...current,
       paths: current.paths.map((path) =>
         path.id === pathId
-          ? {
+          ? sanitizePath({
               ...path,
               poses: path.poses.map((pose) =>
                 pose.id === poseId ? sanitizePosePatch(path, pose, patch) : pose,
               ),
-            }
+            })
           : path,
       ),
     }));
@@ -268,45 +229,65 @@ export function usePathEditorState() {
     }));
   }
 
+  function selectTurn(turnId: string) {
+    updateLive((current) => ({
+      ...current,
+      selection: { type: "turn", turnId },
+    }));
+  }
   function addPath() {
     const previousPath = state.paths[state.paths.length - 1];
     const previousEnd = previousPath.poses[previousPath.poses.length - 1];
-    const id = `path-${crypto.randomUUID()}`;
-    const nextPath: EditorPath = {
-      id,
-      name: `path${state.paths.length + 1}`,
-      collapsed: false,
-      interpolation: InterpolationStyle.SMOOTH_START_TO_END,
-      tangentOffsetDeg: 90,
-      customFunctionSource: "s -> Angle.fromDeg(180 + (s * 360.0))",
-      poses: [
-        makePose("pose1", previousEnd.x, previousEnd.y, previousEnd.headingDeg ?? 0),
-        makePose("pose2", clampField(previousEnd.x + 36), clampField(previousEnd.y + 18), 0),
-      ],
-      actions: [],
-    };
+    const nextPath = makePathAfterPose(state.paths.length, previousEnd);
 
     commit((current) => ({
       ...current,
       paths: [...current.paths, nextPath],
-      activePathId: id,
-      selection: { type: "pose", pathId: id, poseId: nextPath.poses[0].id },
+      activePathId: nextPath.id,
+      selection: { type: "pose", pathId: nextPath.id, poseId: nextPath.poses[0].id },
     }));
   }
 
+  function addTurn() {
+    const sourcePath = activePath;
+    const sourceEnd = sourcePath.poses[sourcePath.poses.length - 1];
+    const nextTurn = makeTurnAfterPose(state.turns.length, sourcePath.id, sourceEnd);
+
+    commit((current) => ({
+      ...current,
+      turns: [...current.turns, nextTurn],
+      selection: { type: "turn", turnId: nextTurn.id },
+    }));
+  }
   function deletePath(pathId: string) {
     if (state.paths.length <= 1) return;
 
+    const deletedPoseIds = new Set(
+      state.paths.find((path) => path.id === pathId)?.poses.map((pose) => pose.id) ?? [],
+    );
     const nextPaths = state.paths.filter((path) => path.id !== pathId);
     commit((current) => ({
       ...current,
       paths: nextPaths,
       activePathId: current.activePathId === pathId ? nextPaths[0].id : current.activePathId,
       selection:
-        current.activePathId === pathId ? { type: "path", pathId: nextPaths[0].id } : current.selection,
+        current.activePathId === pathId
+          ? { type: "path", pathId: nextPaths[0].id }
+          : current.selection,
+      favoritePoseIds: current.favoritePoseIds.filter((id) => !deletedPoseIds.has(id)),
     }));
   }
 
+  function deleteTurn(turnId: string) {
+    commit((current) => ({
+      ...current,
+      turns: current.turns.filter((turn) => turn.id !== turnId),
+      selection:
+        current.selection?.type === "turn" && current.selection.turnId === turnId
+          ? { type: "path", pathId: current.activePathId }
+          : current.selection,
+    }));
+  }
   function movePath(pathId: string, direction: -1 | 1) {
     const index = state.paths.findIndex((path) => path.id === pathId);
     const nextIndex = index + direction;
@@ -319,8 +300,20 @@ export function usePathEditorState() {
       return { ...current, paths };
     });
   }
-
   function addPose(point: Translation2d) {
+    const selectedTurnIdForPath = state.selection?.type === "turn" ? state.selection.turnId : null;
+    const selectedTurn = state.turns.find((turn) => turn.id === selectedTurnIdForPath);
+    if (selectedTurn) {
+      const nextPath = makePathAfterTurn(state.paths.length, selectedTurn, point);
+      commit((current) => ({
+        ...current,
+        paths: [...current.paths, nextPath],
+        activePathId: nextPath.id,
+        selection: { type: "pose", pathId: nextPath.id, poseId: nextPath.poses[1].id },
+      }));
+      return;
+    }
+
     const nextPose = makePose(
       `pose${activePath.poses.length + 1}`,
       snap(point.x),
@@ -337,6 +330,35 @@ export function usePathEditorState() {
     }));
   }
 
+  function addPoseToActivePath(sourcePose: EditorPose) {
+    const nextPose: EditorPose = {
+      ...sourcePose,
+      id: `pose-${crypto.randomUUID()}`,
+      name: `pose${activePath.poses.length + 1}`,
+    };
+
+    commit((current) => ({
+      ...current,
+      paths: current.paths.map((path) =>
+        path.id === activePath.id ? sanitizePath({ ...path, poses: [...path.poses, nextPose] }) : path,
+      ),
+      selection: { type: "pose", pathId: activePath.id, poseId: nextPose.id },
+    }));
+  }
+
+  function useFavoritePose(poseId: string) {
+    const pose = state.paths.flatMap((path) => path.poses).find((item) => item.id === poseId);
+    if (pose) addPoseToActivePath(pose);
+  }
+  function toggleFavoritePose(poseId: string) {
+    updateLive((current) => ({
+      ...current,
+      favoritePoseIds: current.favoritePoseIds.includes(poseId)
+        ? current.favoritePoseIds.filter((id) => id !== poseId)
+        : [poseId, ...current.favoritePoseIds],
+    }));
+  }
+
   function deletePose(pathId: string, poseId: string) {
     const path = state.paths.find((item) => item.id === pathId);
     if (!path || path.poses.length <= 2) return;
@@ -350,33 +372,41 @@ export function usePathEditorState() {
     commit((current) => ({
       ...current,
       paths: current.paths.map((item) =>
-        item.id === pathId ? { ...item, poses: renumberPoses(nextPoses) } : item,
+        item.id === pathId ? sanitizePath({ ...item, poses: renumberPoses(nextPoses) }) : item,
       ),
       selection: nextSelection,
+      favoritePoseIds: current.favoritePoseIds.filter((id) => id !== poseId),
     }));
   }
-
   function addAction(pathId: string, type: PathAction["type"]) {
     const path = state.paths.find((item) => item.id === pathId);
     const built = builtPaths.find((item) => item.path.id === pathId);
     if (!path) return;
 
     const id = `action-${crypto.randomUUID()}`;
-    const nextAction: PathAction =
-      type === "callback"
-        ? { id, type, distanceIn: Math.round((built?.segment?.getLengthIn() ?? 100) / 2), label: "callback" }
-        : type === "turn"
-          ? { id, type, headingDeg: 180 }
-          : { id, type, durationSeconds: 1 };
+    const nextAction: PathAction = {
+      id,
+      type,
+      ...(type === "distanceCallback"
+        ? { distanceIn: Math.round((built?.segment?.getLengthIn() ?? 100) / 2) }
+        : { angleDeg: 90 }),
+      label: "callback",
+    } as PathAction;
 
     patchPath(pathId, { actions: [...path.actions, nextAction] });
   }
 
+  function patchTurn(turnId: string, patch: Partial<EditorTurn>) {
+    const apply = Object.keys(patch).every((key) => key === "name") ? updateLive : commit;
+    apply((current) => ({
+      ...current,
+      turns: current.turns.map((turn) => (turn.id === turnId ? { ...turn, ...patch } : turn)),
+    }));
+  }
   function patchAction(pathId: string, actionId: string, patch: Partial<PathAction>) {
     const apply = Object.keys(patch).every((key) => key === "label") ? updateLive : commit;
     patchActionWith(apply, pathId, actionId, patch);
   }
-
   function patchActionLive(pathId: string, actionId: string, patch: Partial<PathAction>) {
     patchActionWith(updateLive, pathId, actionId, patch);
   }
@@ -463,7 +493,6 @@ export function usePathEditorState() {
     if (!dragStartedSnappedEndpoint) snapEndpointIfClose(pathId, poseId);
     endDrag();
   }
-
   function handlePathDrag(pathId: string, event: KonvaEventObject<DragEvent>) {
     const dragState = pathDragStateRef.current;
     if (!dragState || dragState.pathId !== pathId) return;
@@ -500,7 +529,6 @@ export function usePathEditorState() {
     handlePathDrag(pathId, event);
     endDrag();
   }
-
   function handleGhostDrag(pathId: string, arcPoseId: string, event: KonvaEventObject<DragEvent>) {
     const path = state.paths.find((item) => item.id === pathId);
     const arcPose = path?.poses.find((pose) => pose.id === arcPoseId);
@@ -522,7 +550,6 @@ export function usePathEditorState() {
     handleGhostDrag(pathId, arcPoseId, event);
     endDrag();
   }
-
   function handleCallbackDrag(pathId: string, actionId: string, event: KonvaEventObject<DragEvent>) {
     const built = builtPaths.find((item) => item.path.id === pathId);
     if (!built?.segment) return;
@@ -545,6 +572,19 @@ export function usePathEditorState() {
     event: KonvaEventObject<DragEvent>,
   ) {
     handleCallbackDrag(pathId, actionId, event);
+    endDrag();
+  }
+  function handleTurnDrag(turnId: string, event: KonvaEventObject<DragEvent>) {
+    const point = fromCanvas(clampCanvasPoint(event.target.x(), event.target.y(), canvasSize), scale);
+    updateLive((current) => ({ ...current, turns: patchTurnPoint(current.turns, turnId, point) }));
+  }
+
+  function handleTurnDragEnd(turnId: string, event: KonvaEventObject<DragEvent>) {
+    handleTurnDrag(turnId, event);
+    setHistory((current) => ({
+      ...current,
+      present: snapTurnIfCloseInState(current.present, turnId),
+    }));
     endDrag();
   }
 
@@ -587,7 +627,6 @@ export function usePathEditorState() {
     setPendingHeadingPoseId(null);
     endDrag();
   }
-
   function deleteSelected() {
     const selection = state.selection;
     if (!selection) return;
@@ -596,6 +635,8 @@ export function usePathEditorState() {
       deletePose(selection.pathId, selection.poseId);
     } else if (selection.type === "path") {
       deletePath(selection.pathId);
+    } else if (selection.type === "turn") {
+      deleteTurn(selection.turnId);
     } else {
       removeAction(selection.pathId, selection.actionId);
     }
@@ -605,61 +646,14 @@ export function usePathEditorState() {
     setArcShortcutHintVisible(true);
     window.setTimeout(() => setArcShortcutHintVisible(false), 1800);
   }
-
   function snapEndpointIfClose(pathId: string, poseId: string) {
     setHistory((current) => {
-      const path = current.present.paths.find((item) => item.id === pathId);
-      if (!path) return current;
-
-      const poseIndex = path.poses.findIndex((pose) => pose.id === poseId);
-      if (!isEndpoint(poseIndex, path.poses.length)) return current;
-
-      const pose = path.poses[poseIndex];
-      let snapTarget: Translation2d | null = null;
-
-      // Only start-to-end or end-to-start endpoint releases can snap across paths.
-      for (const otherPath of current.present.paths) {
-        if (otherPath.id === pathId) continue;
-        const otherEndpoint =
-          poseIndex === 0 ? otherPath.poses[otherPath.poses.length - 1] : otherPath.poses[0];
-        if (Math.hypot(pose.x - otherEndpoint.x, pose.y - otherEndpoint.y) <= 2) {
-          snapTarget = otherEndpoint;
-          break;
-        }
-      }
-
-      if (!snapTarget) return current;
-
+      const present = snapEndpointIfCloseInState(current.present, pathId, poseId);
       return {
         ...current,
-        present: {
-          ...current.present,
-          paths: current.present.paths.map((item) =>
-            item.id === pathId
-              ? {
-                  ...item,
-                  poses: item.poses.map((candidate) =>
-                    candidate.id === poseId
-                      ? { ...candidate, x: clampField(snapTarget.x), y: clampField(snapTarget.y) }
-                      : candidate,
-                  ),
-                }
-              : item,
-          ),
-        },
+        present,
       };
     });
-  }
-
-  function clampPathDelta(delta: number, values: number[]): number {
-    const limit = FIELD_SIZE_IN / 2 - FIELD_EDGE_MARGIN_IN;
-    const minValue = Math.min(...values);
-    const maxValue = Math.max(...values);
-    return Math.max(-limit - minValue, Math.min(limit - maxValue, delta));
-  }
-
-  function normalizeHeadingDeg(value: number): number {
-    return ((value % 360) + 360) % 360;
   }
 
   keyboardHandlersRef.current = {
@@ -693,30 +687,34 @@ export function usePathEditorState() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  function isTypingTarget(target: EventTarget | null): boolean {
-    return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
-  }
-
   return {
     containerRef,
     state,
     selectedPoseId,
     selectedActionId,
+    selectedTurnId,
     history,
     arcShortcutHintVisible,
     pendingHeadingPoseId,
+    favoritePoses,
     builtPaths,
     canvasSize,
     scale,
     undo,
     redo,
     addPath,
+    addTurn,
+    useFavoritePose,
+    toggleFavoritePose,
     deletePath,
+    deleteTurn,
     movePath,
     selectPath,
     selectPose,
+    selectTurn,
     selectAction,
     patchPath,
+    patchTurn,
     patchPose,
     addAction,
     patchAction,
@@ -732,6 +730,8 @@ export function usePathEditorState() {
     handleGhostDragEnd,
     handleCallbackDrag,
     handleCallbackDragEnd,
+    handleTurnDrag,
+    handleTurnDragEnd,
     handleHeadingDrag,
     handleHeadingDragEnd,
     showArcShortcutHint,
